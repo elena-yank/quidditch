@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Квиддич</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <div>
+          <h1 id="pageTitle">
+            <a href="https://vk.ru/magichogwarts_school" target="_blank" rel="noopener noreferrer" aria-label="Открыть сообщество ВК">
+              <img id="pageLogo" class="logo" src="/src/logo.svg" alt="Квиддич" />
+            </a>
+            <span id="pageTitleText">Квиддич</span>
+          </h1>
+          <div class="small" id="pageSubtitle"></div>
+        </div>
+        <div class="headerRight">
+          <div class="pill roomCodePill" id="roomCodePill">
+            <strong id="roomCodeLabel"></strong>
+            <button class="pillBtn iconOnly" id="copyRoomBtn" title="Скопировать код комнаты" type="button" aria-label="Скопировать код комнаты">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect>
+                <path
+                  d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                ></path>
+              </svg>
+            </button>
+          </div>
+          <button id="leaveGameBtn" class="danger" type="button">Выйти из игры</button>
+        </div>
+      </header>
+
+      <section id="homeView">
+        <div class="card">
+          <div class="tabs" role="tablist" aria-label="Режим входа">
+            <button class="tabBtn active" type="button" data-tab="create" aria-selected="true">Создать</button>
+            <button class="tabBtn" type="button" data-tab="join" aria-selected="false">Присоединиться</button>
+            <button class="tabBtn" type="button" data-tab="watch" aria-selected="false">Наблюдать</button>
+          </div>
+
+          <div class="tabPanel" data-panel="create">
+            <h2>Создать игру</h2>
+            <div class="formBlock">
+              <div class="blockTitle">Команды матча</div>
+              <div class="row two">
+                <label>
+                  Команда A
+                  <select id="createTeamA"></select>
+                </label>
+                <label>
+                  Команда B
+                  <select id="createTeamB"></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="formBlock">
+              <div class="blockTitle">Твой игрок</div>
+              <div class="row two">
+                <label>
+                  Моя команда
+                  <select id="createYourTeam"></select>
+                </label>
+                <label>
+                  Роль
+                  <select id="createRole"></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="formBlock">
+              <div class="blockTitle">Боты</div>
+              <div class="row two">
+                <label>
+                  Боты в пустые места
+                  <select id="createFillBots">
+                    <option value="no">нет</option>
+                    <option value="yes">да</option>
+                  </select>
+                </label>
+                <label>
+                  Сложность ботов
+                  <select id="createBotDifficulty"></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="formBlock">
+              <div class="row two">
+                <label>
+                  Имя
+                  <input id="createNick" placeholder="например, Гарри" autocomplete="off" />
+                </label>
+                <div class="rowAction">
+                  <button id="createBtn" type="button">Создать и войти</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tabPanel hidden" data-panel="join">
+            <h2>Присоединиться к игре</h2>
+            <div class="formBlock">
+              <div class="row two">
+                <label>
+                  Код комнаты
+                  <input id="joinCode" placeholder="например, A3K9QX" autocomplete="off" />
+                </label>
+                <div class="rowAction">
+                  <button id="loadJoinTeamsBtn" type="button">Загрузить команды</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="formBlock">
+              <div class="row two">
+                <label>
+                  Команда
+                  <select id="joinTeam" disabled></select>
+                </label>
+                <label>
+                  Роль
+                  <select id="joinRole"></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="formBlock">
+              <div class="row two">
+                <label>
+                  Имя
+                  <input id="joinNick" placeholder="например, Дин" autocomplete="off" />
+                </label>
+                <div class="rowAction">
+                  <button id="joinBtn" type="button" disabled>Войти</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tabPanel hidden" data-panel="watch">
+            <h2>Наблюдать за игрой</h2>
+            <div class="row">
+              <label>
+                Код комнаты
+                <input id="watchCode" placeholder="например, A3K9QX" autocomplete="off" />
+              </label>
+            </div>
+            <div class="row">
+              <label>
+                Имя
+                <input id="watchNick" placeholder="например, Луна" autocomplete="off" />
+              </label>
+            </div>
+            <div class="actions">
+              <button id="watchBtn">Смотреть</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="roomView" class="hidden">
+        <div class="card">
+          <div id="rolePickerBlock" class="hidden">
+            <h2 style="margin-bottom: 10px">Выбор роли</h2>
+            <div class="roleButtons" id="roleButtons"></div>
+            <div class="small muted" style="margin-top: 10px">
+              Серые роли либо заняты, либо пока недоступны (в разработке).
+            </div>
+            <div class="hr"></div>
+          </div>
+
+          <div class="sectionTitleRow" style="margin-bottom: 10px">
+            <div class="sectionTitleLeft">
+              <button class="h2Btn" id="participantsOpenBtn" type="button">Участники</button>
+              <button class="h2Btn h2SubBtn" id="observersOpenBtn" type="button">Наблюдатели</button>
+            </div>
+            <div class="pill mePill" id="meLabel"></div>
+          </div>
+
+          <div class="hr"></div>
+
+          <div class="fieldLayout">
+            <div class="boardWrap">
+              <div class="board" id="board">
+                <div class="pitch" id="pitch"></div>
+              </div>
+            </div>
+            <div class="sidePanel" id="sidePanel">
+              <div class="sideTopArea" id="sideTopArea">
+                <div class="sideStack sideStatusRow">
+                  <div class="pill" id="stepStatus">Ход: —</div>
+                  <div class="pill" id="scoreStatus">Счёт: —</div>
+                </div>
+                <div class="sideStack sideActions">
+                  <button id="pickupQuaffleBtn" disabled>Взять Квоффл</button>
+                  <button id="stealQuaffleBtn" disabled>Выхватить Квоффл</button>
+                  <button id="passQuaffleBtn" disabled>Дать пас</button>
+                  <button id="hitBludgerBtn" disabled>Ударить бладжер</button>
+                  <button id="endTurnBtn">Завершить ход</button>
+                </div>
+              </div>
+              <div class="sideStack eventsStack" id="eventsStack">
+                <div class="eventTitle">События</div>
+                <div class="eventLog" id="eventLog"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="toast" id="toast"></div>
+    <div class="overlay hidden" id="duelOverlay">
+      <div class="overlayCard">
+        <div class="overlayTitle" id="duelTitle"></div>
+        <div class="bar" id="duelBar"><div class="barFill" id="duelBarFill"></div></div>
+        <div class="overlayText" id="duelHint"></div>
+        <div class="overlayResult" id="duelResult"></div>
+      </div>
+    </div>
+
+    <div class="overlay hidden" id="participantsOverlay">
+      <div class="overlayCard participantsCard">
+        <div class="modalHead">
+          <h3 class="modalTitle">Участники</h3>
+          <button class="modalClose" id="participantsCloseBtn" type="button">закрыть</button>
+        </div>
+        <div class="participantsGrid">
+          <div class="teamBlock">
+            <div class="teamHead">
+              <div class="teamName" id="participantsTeamALabel">—</div>
+              <div class="teamMeta" id="participantsTeamAMeta">—</div>
+            </div>
+            <div class="pList" id="participantsTeamAList"></div>
+          </div>
+          <div class="teamBlock">
+            <div class="teamHead">
+              <div class="teamName" id="participantsTeamBLabel">—</div>
+              <div class="teamMeta" id="participantsTeamBMeta">—</div>
+            </div>
+            <div class="pList" id="participantsTeamBList"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="overlay hidden" id="observersOverlay">
+      <div class="overlayCard participantsCard">
+        <div class="modalHead">
+          <h3 class="modalTitle">Наблюдатели</h3>
+          <button class="modalClose" id="observersCloseBtn" type="button">закрыть</button>
+        </div>
+        <div class="pList" id="observersList"></div>
+      </div>
+    </div>
+
+    <script src="/messages.js" defer></script>
+    <script src="/app.api.js" defer></script>
+    <script src="/app.state.js" defer></script>
+    <script src="/app.dom.js" defer></script>
+    <script src="/app.ui.js" defer></script>
+    <script src="/app.main.js" defer></script>
+  </body>
+</html>

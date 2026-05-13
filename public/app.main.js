@@ -1,0 +1,595 @@
+async function refreshRoomOnce() {
+  if (!state.roomCode) return;
+  const res = await api.state(state.roomCode, state.session?.participantId || null);
+  if (!res.ok) {
+    if (res.status === 404 || res.body?.error === "not_found") {
+      showToast("Комната удалена");
+      clearSession();
+      await goHome();
+      return;
+    }
+    showToast("Комната недоступна");
+    return;
+  }
+  const prev = state.gameState;
+  const next = res.body;
+  if (!prev) {
+    state.seenEventIds = new Set((Array.isArray(next?.events) ? next.events : []).map((e) => e?.id).filter(Boolean));
+  } else {
+    captureServerEvents(prev, next);
+  }
+  captureGameEvents(prev, next);
+  state.gameState = next;
+  renderRoom(next);
+}
+
+function startRoomPolling() {
+  stopRoomPolling();
+  state.interval = setInterval(refreshRoomOnce, 2000);
+}
+
+function stopRoomPolling() {
+  if (state.interval) clearInterval(state.interval);
+  state.interval = null;
+}
+
+const HOME_TITLE = "Квиддич";
+const HOME_SUBTITLE = "";
+let homeTabsInited = false;
+
+function setHomeHeader() {
+  if (els.pageTitleText) els.pageTitleText.textContent = HOME_TITLE;
+  if (els.pageSubtitle) els.pageSubtitle.textContent = HOME_SUBTITLE;
+  document.title = HOME_TITLE;
+}
+
+function setHomeTab(key) {
+  const root = els.homeView;
+  if (!root) return;
+  const btns = root.querySelectorAll?.(".tabs [data-tab]");
+  const panels = root.querySelectorAll?.(".tabPanel[data-panel]");
+  if (!btns || !panels) return;
+
+  for (const b of btns) {
+    const active = b.dataset.tab === key;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  for (const p of panels) {
+    p.classList.toggle("hidden", p.dataset.panel !== key);
+  }
+}
+
+function initHomeTabs() {
+  if (homeTabsInited) return;
+  const root = els.homeView;
+  if (!root) return;
+  const btns = root.querySelectorAll?.(".tabs [data-tab]");
+  if (!btns || btns.length === 0) return;
+  for (const b of btns) {
+    b.addEventListener("click", () => setHomeTab(b.dataset.tab));
+  }
+  homeTabsInited = true;
+  setHomeTab("create");
+}
+
+function resetRoomScopedState() {
+  state.gameState = null;
+  state.eventLog = [];
+  state.seenEventIds = new Set();
+  state.selected = null;
+  state.duelUi = null;
+  state.lastResolvedDuelId = null;
+  state.lastAutoEndedStepNo = null;
+  state.lastStunnedStepNo = null;
+  state.lastMoveTap = null;
+  state.draft = { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null };
+  renderEventLog();
+}
+
+async function goRoom(code) {
+  const nextRoom = code.toUpperCase();
+  if (state.roomCode !== nextRoom) resetRoomScopedState();
+  state.roomCode = nextRoom;
+  setView("room");
+  await refreshRoomOnce();
+  startRoomPolling();
+}
+
+async function goHome() {
+  stopRoomPolling();
+  state.roomCode = null;
+  resetRoomScopedState();
+  setHomeHeader();
+  try {
+    history.replaceState(null, "", location.pathname + location.search);
+  } catch {
+    location.hash = "";
+  }
+  setView("home");
+  setHomeTab("create");
+}
+
+function syncCreateTeamOptions() {
+  const a = els.createTeamA.value;
+  const b = els.createTeamB.value;
+  const options = [];
+  if (a) options.push({ value: a, label: teamLabel(a) });
+  if (b && b !== a) options.push({ value: b, label: teamLabel(b) });
+  fillSelect(els.createYourTeam, options, { placeholder: "выбери" });
+  els.createYourTeam.value = options[0]?.value || "";
+}
+
+async function setupHome() {
+  initHomeTabs();
+  const teamsArray = Array.from(TEAMS.values()).map((t) => ({ value: t.key, label: t.label }));
+  fillSelect(els.createTeamA, teamsArray, { placeholder: "выбери" });
+  fillSelect(els.createTeamB, teamsArray, { placeholder: "выбери" });
+
+  const roleArray = Array.from(ROLES.values()).map((r) => ({ value: r.key, label: r.label + (r.enabled ? "" : " (недоступно)") }));
+  fillSelect(els.createRole, roleArray);
+  fillSelect(els.joinRole, roleArray);
+
+  els.createTeamA.addEventListener("change", syncCreateTeamOptions);
+  els.createTeamB.addEventListener("change", syncCreateTeamOptions);
+
+  els.createTeamA.value = teamsArray[0]?.value || "";
+  els.createTeamB.value = teamsArray[1]?.value || "";
+  syncCreateTeamOptions();
+  els.createRole.value = "chaser1";
+  els.joinRole.value = "chaser1";
+
+  const botOptions = BOT_DIFFICULTIES.map((d) => ({ value: String(d.level), label: d.label }));
+  fillSelect(els.createBotDifficulty, botOptions);
+  els.createBotDifficulty.value = botOptions[1]?.value || botOptions[0]?.value || "2";
+  els.createFillBots.value = "no";
+
+  els.createBtn.addEventListener("click", async () => {
+    const teamA = els.createTeamA.value;
+    const teamB = els.createTeamB.value;
+    const yourTeam = els.createYourTeam.value;
+    const role = els.createRole.value;
+    const nickname = els.createNick.value;
+    const fillBots = els.createFillBots.value === "yes";
+    const botDifficulty = Number(els.createBotDifficulty.value || 2);
+
+    if (!teamA || !teamB || teamA === teamB) {
+      showToast("Выбери две разные команды матча");
+      return;
+    }
+    if (!yourTeam) {
+      showToast("Выбери свою команду");
+      return;
+    }
+
+    const createRes = await api.createGame({ teamA, teamB });
+    if (!createRes.ok) {
+      showToast("Не удалось создать игру");
+      return;
+    }
+
+    const code = createRes.body.code;
+    const joinRes = await api.join(code, { mode: "player", nickname, team: yourTeam, role });
+    if (!joinRes.ok) {
+      if (joinRes.status === 409) showToast("Роль уже занята");
+      else showToast("Не удалось войти");
+      return;
+    }
+
+    if (fillBots) {
+      try {
+        await api.fillBots(code, { difficulty: botDifficulty });
+      } catch {}
+    }
+
+    saveSession({ code, participantId: joinRes.body.participantId });
+    location.hash = `#room=${code}`;
+  });
+
+  els.loadJoinTeamsBtn.addEventListener("click", async () => {
+    const code = String(els.joinCode.value || "").trim().toUpperCase();
+    if (!code) {
+      showToast("Введи код комнаты");
+      return;
+    }
+    const res = await api.state(code);
+    if (!res.ok) {
+      showToast("Комната не найдена");
+      els.joinTeam.disabled = true;
+      els.joinBtn.disabled = true;
+      els.joinTeam.innerHTML = "";
+      return;
+    }
+
+    const teamOptions = [
+      { value: res.body.game.teamA, label: teamLabel(res.body.game.teamA) },
+      { value: res.body.game.teamB, label: teamLabel(res.body.game.teamB) }
+    ];
+    fillSelect(els.joinTeam, teamOptions);
+    els.joinTeam.disabled = false;
+    els.joinBtn.disabled = false;
+  });
+
+  els.joinBtn.addEventListener("click", async () => {
+    const code = String(els.joinCode.value || "").trim().toUpperCase();
+    const team = els.joinTeam.value;
+    const role = els.joinRole.value;
+    const nickname = els.joinNick.value;
+    if (!code) return showToast("Введи код комнаты");
+    if (!team) return showToast("Выбери команду");
+
+    const joinRes = await api.join(code, { mode: "player", nickname, team, role });
+    if (!joinRes.ok) {
+      if (joinRes.status === 409) showToast("Роль уже занята");
+      else if (joinRes.body?.error === "team_not_in_game") showToast("Эта команда не участвует в матче");
+      else showToast("Не удалось войти");
+      return;
+    }
+    saveSession({ code, participantId: joinRes.body.participantId });
+    location.hash = `#room=${code}`;
+  });
+
+  els.watchBtn.addEventListener("click", async () => {
+    const code = String(els.watchCode.value || "").trim().toUpperCase();
+    const nickname = els.watchNick.value;
+    if (!code) return showToast("Введи код комнаты");
+
+    const res = await api.state(code);
+    if (!res.ok) {
+      showToast("Комната не найдена");
+      return;
+    }
+    const team = res.body?.game?.teamA || null;
+    if (!team) {
+      showToast("Комната не найдена");
+      return;
+    }
+
+    const joinRes = await api.join(code, { mode: "observer", nickname, team });
+    if (!joinRes.ok) {
+      showToast("Не удалось войти наблюдателем");
+      return;
+    }
+
+    saveSession({ code, participantId: joinRes.body.participantId });
+    location.hash = `#room=${code}`;
+  });
+}
+
+async function autoEndTurnIfNoMoreChoices(gameState) {
+  const myId = state.session?.participantId || null;
+  if (!myId) return;
+  const me = gameState.participants.find((p) => p.id === myId) || null;
+  if (!me || me.is_observer || !isMovableRole(me.role)) return;
+  const stepNo = gameState.game.stepNo ?? null;
+  if (typeof stepNo !== "number") return;
+  if (state.lastAutoEndedStepNo === stepNo) return;
+  if (state.duelUi && state.duelUi.phase === "active") return;
+
+  const ts = gameState.turnStates ? gameState.turnStates[myId] : null;
+  if (!ts || ts.ended || ts.stunned) return;
+  if (state.draft?.actionType) return;
+
+  const basePos = normalizeCoord(me.pos) || defaultSpawnCoord({ role: me.role, team: me.team, teamA: gameState.game.teamA, teamB: gameState.game.teamB });
+  if (!basePos) return;
+
+  const plannedTo = normalizeCoord(state.draft?.to) || normalizeCoord(ts?.plannedTo);
+  const actionFrom = plannedTo || basePos;
+  const hasAction = hasAnyActionOption({ gameState, me, fromCoord: actionFrom });
+  if (plannedTo) {
+    if (hasAction) return;
+    const res = await api.endTurn(myId, { to: plannedTo, actionType: null, actionTo: null, actionBludger: null });
+    if (!res.ok) return;
+    state.lastAutoEndedStepNo = stepNo;
+    state.draft = { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null };
+    showToast("Заявка отправлена");
+    await refreshRoomOnce();
+    return;
+  }
+
+  const hasMove = hasAnyMoveOption({ gameState, me, fromCoord: basePos });
+  if (hasAction || hasMove) return;
+
+  const res = await api.endTurn(myId, { to: null, actionType: null, actionTo: null, actionBludger: null });
+  if (!res.ok) return;
+  state.lastAutoEndedStepNo = stepNo;
+  state.draft = { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null };
+  showToast("Заявка отправлена");
+  await refreshRoomOnce();
+}
+
+async function bootstrap() {
+  try {
+    const [health, meta] = await Promise.all([api.health(), api.meta()]);
+    if (!health?.ok) showToast("сервер недоступен");
+    els.endTurnBtn.textContent = "Завершить ход";
+
+    for (const t of meta.teams || []) TEAMS.set(t.key, t);
+    for (const r of meta.roles || []) ROLES.set(r.key, r);
+    BOT_DIFFICULTIES.length = 0;
+    for (const d of meta.botDifficulties || []) BOT_DIFFICULTIES.push(d);
+
+    state.session = loadSession();
+    await setupHome();
+    await ensureBoardPitchLayoutLoaded();
+
+    const wrap = els.board.closest?.(".boardWrap");
+    if (wrap && els.duelOverlay.parentElement !== wrap) {
+      wrap.appendChild(els.duelOverlay);
+    }
+    if (wrap && els.participantsOverlay.parentElement !== wrap) {
+      wrap.appendChild(els.participantsOverlay);
+    }
+    if (wrap && els.observersOverlay.parentElement !== wrap) {
+      wrap.appendChild(els.observersOverlay);
+    }
+
+    els.leaveGameBtn.addEventListener("click", async () => {
+      const id = state.session?.participantId || null;
+      if (id) {
+        try {
+          await api.leave(id);
+        } catch {}
+      }
+      clearSession();
+      await goHome();
+    });
+
+    els.pickupQuaffleBtn.addEventListener("click", async () => {
+      const gs = state.gameState;
+      const myId = state.session?.participantId || null;
+      const me = myId && gs ? gs.participants.find((p) => p.id === myId) : null;
+      state.draft.actionType = me && isKeeperRole(me.role) ? "keeper_pickup" : "pickup";
+      state.draft.actionPickedAt = Date.now();
+      state.draft.actionTo = null;
+      state.draft.actionBludger = null;
+      showToast(me && isKeeperRole(me.role) ? "Заявка: поднять квоффл" : "Заявка: взять квоффл");
+    });
+
+    els.duelBar.addEventListener("click", async () => {
+      const myId = state.session?.participantId;
+      if (!myId) return;
+      if (!state.duelUi || state.duelUi.phase !== "active") return;
+      if (state.duelUi.submitted) return;
+
+      state.duelUi.submitted = true;
+      stopDuelAnimation();
+      const score = Math.max(0, Math.min(100, Number(state.duelUi.currentPercent || 0)));
+      els.duelHint.textContent = `Твой результат: ${score}%. Ждём соперника…`;
+
+      const res = await api.submitSteal(myId, { duelId: state.duelUi.duelId, score });
+      if (!res.ok) {
+        els.duelHint.textContent = "Не удалось отправить результат";
+        state.duelUi.submitted = false;
+        startDuelAnimation();
+        return;
+      }
+
+      await refreshRoomOnce();
+    });
+
+    els.stealQuaffleBtn.addEventListener("click", async () => {
+      const gs = state.gameState;
+      const myId = state.session?.participantId || null;
+      const me = myId && gs ? gs.participants.find((p) => p.id === myId) : null;
+      if (!me || me.is_observer || !isChaserRole(me.role)) return;
+
+      if (state.draft?.actionType === "steal") {
+        state.draft.actionType = null;
+        state.draft.actionPickedAt = null;
+        state.draft.actionTo = null;
+        state.draft.actionBludger = null;
+        showToast("Заявка: выхват отменён");
+        await refreshRoomOnce();
+        return;
+      }
+
+      const myPos0 = normalizeCoord(me.pos) || defaultSpawnCoord({ role: me.role, team: me.team, teamA: gs.game.teamA, teamB: gs.game.teamB });
+      const myPos = normalizeCoord(state.draft?.to) || myPos0;
+      if (!myPos) return;
+
+      const ok = canStealQuaffle({ gameState: gs, me, fromCoord: myPos });
+      if (!ok) {
+        showToast("Ты не рядом с держателем квоффла");
+        return;
+      }
+
+      state.draft.actionType = "steal";
+      state.draft.actionPickedAt = Date.now();
+      state.draft.actionTo = null;
+      state.draft.actionBludger = null;
+      showToast("Заявка: выхват квоффла");
+      await refreshRoomOnce();
+    });
+
+    els.passQuaffleBtn.addEventListener("click", async () => {
+      const gs = state.gameState;
+      const myId = state.session?.participantId || null;
+      const me = myId && gs ? gs.participants.find((p) => p.id === myId) : null;
+      if (!me || me.is_observer || !isChaserRole(me.role)) return;
+      const hasQuaffle = gs?.quaffle?.holderId === me.id;
+      if (!hasQuaffle) return;
+
+      if (state.draft?.actionType === "pass") {
+        state.draft.actionType = null;
+        state.draft.actionPickedAt = null;
+        state.draft.actionTo = null;
+        state.draft.actionBludger = null;
+        showToast("Заявка: пас отменён");
+        await refreshRoomOnce();
+        return;
+      }
+
+      const myPos0 = normalizeCoord(me.pos) || defaultSpawnCoord({ role: me.role, team: me.team, teamA: gs.game.teamA, teamB: gs.game.teamB });
+      const myPos = normalizeCoord(state.draft?.to) || myPos0;
+      if (!myPos) return;
+      const coords = passTargetsForChaser({ gameState: gs, me, fromCoord: myPos });
+      if (coords.length === 0) {
+        showToast("Некому дать пас рядом");
+        return;
+      }
+
+      state.draft.actionType = "pass";
+      state.draft.actionPickedAt = Date.now();
+      state.draft.actionTo = null;
+      state.draft.actionBludger = null;
+      showToast("Выбери охотника для паса");
+      await refreshRoomOnce();
+    });
+
+    els.hitBludgerBtn.addEventListener("click", async () => {
+      const gs = state.gameState;
+      const myId = state.session?.participantId || null;
+      const me = myId && gs ? gs.participants.find((p) => p.id === myId) : null;
+      if (!me || me.is_observer || !isBeaterRole(me.role)) return;
+
+      if (state.draft?.actionType === "hit_bludger") {
+        state.draft.actionType = null;
+        state.draft.actionPickedAt = null;
+        state.draft.actionTo = null;
+        state.draft.actionBludger = null;
+        showToast("Заявка: удар отменён");
+        await refreshRoomOnce();
+        return;
+      }
+
+      const myPos0 = normalizeCoord(me.pos) || defaultSpawnCoord({ role: me.role, team: me.team, teamA: gs.game.teamA, teamB: gs.game.teamB });
+      const myPos = normalizeCoord(state.draft?.to) || myPos0;
+      if (!myPos) return;
+
+      const arr = Array.isArray(gs.bludgers) ? gs.bludgers : [];
+      const b1 = normalizeCoord(arr[0]);
+      const b2 = normalizeCoord(arr[1]);
+      const near1 = b1 ? chebyshevDistance(myPos, b1) === 1 : false;
+      const near2 = b2 ? chebyshevDistance(myPos, b2) === 1 : false;
+      const idx = near1 ? 1 : near2 ? 2 : null;
+      if (!idx) {
+        showToast("Ты не рядом с бладжером");
+        return;
+      }
+
+      state.draft.actionType = "hit_bludger";
+      state.draft.actionPickedAt = Date.now();
+      state.draft.actionBludger = idx;
+      state.draft.actionTo = null;
+      showToast("Выбери клетку для удара по бладжеру");
+      await refreshRoomOnce();
+    });
+
+    els.copyRoomBtn.addEventListener("click", async () => {
+      const code = String(state.roomCode || "").trim().toUpperCase();
+      if (!code) return;
+      const ok = await copyToClipboard(code);
+      showToast(ok ? "Код комнаты скопирован" : "Не удалось скопировать");
+    });
+
+    els.participantsOpenBtn.addEventListener("click", () => {
+      els.participantsOverlay.classList.remove("hidden");
+      if (state.gameState) renderParticipants(state.gameState);
+    });
+
+    els.participantsCloseBtn.addEventListener("click", () => {
+      els.participantsOverlay.classList.add("hidden");
+    });
+
+    els.participantsOverlay.addEventListener("click", (e) => {
+      if (e.target === els.participantsOverlay) els.participantsOverlay.classList.add("hidden");
+    });
+
+    els.observersOpenBtn.addEventListener("click", () => {
+      els.observersOverlay.classList.remove("hidden");
+      if (state.gameState) renderObservers(state.gameState);
+    });
+
+    els.observersCloseBtn.addEventListener("click", () => {
+      els.observersOverlay.classList.add("hidden");
+    });
+
+    els.observersOverlay.addEventListener("click", (e) => {
+      if (e.target === els.observersOverlay) els.observersOverlay.classList.add("hidden");
+    });
+
+    els.endTurnBtn.addEventListener("click", async () => {
+      const id = state.session?.participantId;
+      if (!id) return;
+      let actionFirst = false;
+      if (state.draft?.actionType) {
+        const a = state.draft?.actionPickedAt;
+        const m = state.draft?.movePickedAt;
+        if (typeof a === "number" && typeof m === "number") actionFirst = a <= m;
+        else if (typeof a === "number" && m == null) actionFirst = true;
+        else if (a == null && typeof m === "number") actionFirst = false;
+        else actionFirst = false;
+      }
+      const payload = {
+        to: normalizeCoord(state.draft?.to),
+        actionFirst,
+        actionType: state.draft?.actionType || null,
+        actionTo: normalizeCoord(state.draft?.actionTo),
+        actionBludger: state.draft?.actionBludger ?? null
+      };
+      const res = await api.endTurn(id, payload);
+      if (!res.ok) {
+        if (res.status === 400 && res.body?.error === "turn_ended") showToast("Ход уже завершен");
+        else if (res.status === 400 && res.body?.error === "observer_cannot_end") showToast("Наблюдатель не ходит");
+        else if (res.status === 400 && res.body?.error === "role_cannot_end") showToast("Эта роль не ходит");
+        else if (res.status === 400 && res.body?.error === "use_plans") showToast("Сейчас работает режим заявок");
+        else if (res.status === 400 && res.body?.error === "illegal_move") showToast("Нельзя так переместиться");
+        else if (res.status === 409 && res.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
+        else if (res.status === 400 && res.body?.error === "too_far") showToast("Слишком далеко");
+        else if (res.status === 400 && res.body?.error === "not_opponent_goal") showToast("Это не ворота противника");
+        else if (res.status === 400 && res.body?.error === "no_quaffle") showToast("У тебя нет квоффла");
+        else showToast("Не удалось завершить ход");
+        await refreshRoomOnce();
+        return;
+      }
+      state.draft = { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null };
+      showToast("Заявка отправлена");
+      await refreshRoomOnce();
+    });
+
+    const { room } = parseHash();
+    if (room) {
+      if (!state.session || state.session.code !== room) {
+        state.session = { code: room, participantId: null };
+      }
+      setView("room");
+      state.roomCode = room;
+      await refreshRoomOnce();
+      startRoomPolling();
+    } else {
+      setHomeHeader();
+      setView("home");
+    }
+
+    window.addEventListener("resize", () => {
+      if (!state.gameState) return;
+      syncSidePanelHeight();
+    });
+
+    window.addEventListener("hashchange", async () => {
+      const { room: nextRoom } = parseHash();
+      if (!nextRoom) {
+        await goHome();
+        return;
+      }
+      const session = loadSession();
+      state.session = session && session.code === nextRoom ? session : { code: nextRoom, participantId: null };
+      await goRoom(nextRoom);
+    });
+
+    window.addEventListener("pageshow", (e) => {
+      if (!e?.persisted) return;
+      const { room: nextRoom } = parseHash();
+      if (!nextRoom) return;
+      const session = loadSession();
+      state.session = session && session.code === nextRoom ? session : { code: nextRoom, participantId: null };
+      goRoom(nextRoom).catch(() => {});
+    });
+  } catch {
+    setHomeHeader();
+    if (els.pageSubtitle) els.pageSubtitle.textContent = "ошибка запуска";
+  }
+}
+
+bootstrap();
