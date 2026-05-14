@@ -5,6 +5,64 @@ require("dotenv").config();
 const express = require("express");
 const { Pool } = require("pg");
 const { customAlphabet } = require("nanoid");
+let BOT_NAMES = null;
+try {
+  BOT_NAMES = require("./bot.names")?.BOT_NAMES || null;
+} catch {
+  BOT_NAMES = null;
+}
+if (!BOT_NAMES || typeof BOT_NAMES !== "object") {
+  BOT_NAMES = {
+    chaser: [
+      "Витя Квоффлохват",
+      "Игорёк Мячеслав",
+      "Арсений Подквоффл",
+      "Стасик Точнопопадкин",
+      "Кирюша Мячемёткин",
+      "Богдан Воротобьющий",
+      "Лёнька Подстрахов",
+      "Димон Мячеруб",
+      "Ромка Забиванцев",
+      "Серёга Големёткин"
+    ],
+    beater: [
+      "Битя Бладжер",
+      "Коля Колотун",
+      "Макс Череполом",
+      "Паша Молотилов",
+      "Кирюша Колотуша",
+      "Егор Отшибаев",
+      "Ванька Мозготряс",
+      "Женька Отлетанцев",
+      "Денис Черепобив",
+      "Игорёк Битапорылов"
+    ],
+    seeker: [
+      "Златан Снитч",
+      "Витя Золотарь",
+      "Дима Ловкач",
+      "Паша Снитчехват",
+      "Фёдор Снитчеглот",
+      "Ваня Снитчеглав",
+      "Игорёк Снитчман",
+      "Тёма БыстрыйГлаз",
+      "Саня Снитчер",
+      "Славик Ловцов"
+    ],
+    keeper: [
+      "Колька Отбиватор",
+      "Тёма Стенка",
+      "Денис Голоблокер",
+      "Стас Непробивной",
+      "Вован Непробивайло",
+      "Никитос Мячестоп",
+      "Жека Голобарьер",
+      "Лёха Танк",
+      "Витёк Квоффлостоп",
+      "Егор Мощь"
+    ]
+  };
+}
 
 const app = express();
 
@@ -34,6 +92,31 @@ const ROLES = [
   { key: "chaser2", label: "Охотник 2", enabled: true },
   { key: "beater", label: "Загонщик", enabled: true }
 ];
+
+function botNamePoolForRole(roleKey) {
+  if (roleKey === "chaser1" || roleKey === "chaser2") return BOT_NAMES.chaser || [];
+  if (roleKey === "beater") return BOT_NAMES.beater || [];
+  if (roleKey === "seeker") return BOT_NAMES.seeker || [];
+  if (roleKey === "keeper") return BOT_NAMES.keeper || [];
+  return [];
+}
+
+function pickUniqueBotNickname({ roleKey, usedNicknames }) {
+  const used = usedNicknames instanceof Set ? usedNicknames : new Set();
+  const pool = botNamePoolForRole(roleKey).map((s) => String(s || "").trim()).filter(Boolean);
+  const available = pool.filter((n) => !used.has(n));
+  if (available.length > 0) {
+    const picked = available[Math.floor(Math.random() * available.length)];
+    used.add(picked);
+    return picked;
+  }
+  let fallbackBase = pool[0] || "Бот";
+  let i = 2;
+  while (used.has(`${fallbackBase} ${i}`)) i += 1;
+  const out = `${fallbackBase} ${i}`;
+  used.add(out);
+  return out;
+}
 
 const ENABLED_ROLE_KEYS = new Set(ROLES.filter((r) => r.enabled).map((r) => r.key));
 const TEAM_KEYS = new Set(TEAMS.map((t) => t.key));
@@ -414,6 +497,18 @@ async function initDb() {
     await client.query(`UPDATE participants SET stat_goals_scored = 0 WHERE stat_goals_scored IS NULL`);
     await client.query(`UPDATE participants SET stat_goals_saved = 0 WHERE stat_goals_saved IS NULL`);
     await client.query(`UPDATE participants SET stat_snitch_catches = 0 WHERE stat_snitch_catches IS NULL`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_pickups SET DEFAULT 0`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_steals SET DEFAULT 0`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_passes SET DEFAULT 0`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_goals_scored SET DEFAULT 0`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_goals_saved SET DEFAULT 0`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_snitch_catches SET DEFAULT 0`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_pickups SET NOT NULL`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_steals SET NOT NULL`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_passes SET NOT NULL`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_goals_scored SET NOT NULL`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_goals_saved SET NOT NULL`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_snitch_catches SET NOT NULL`);
     await client.query(`UPDATE participants SET is_judge = FALSE WHERE is_judge IS NULL`);
     await client.query(`ALTER TABLE participants ADD COLUMN IF NOT EXISTS is_bot BOOLEAN`);
     await client.query(`ALTER TABLE participants ADD COLUMN IF NOT EXISTS bot_difficulty SMALLINT`);
@@ -727,6 +822,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
   let snitchCaughtById = gameRow?.snitch_caught_by_id || null;
   let snitchCaughtStepNo = gameRow?.snitch_caught_step_no != null ? Number(gameRow.snitch_caught_step_no) : null;
   const hitStunnedIds = new Set();
+  const bludgersHitThisStep = new Set();
   let scoreA = gameRow?.score_a != null ? Number(gameRow.score_a) : 0;
   let scoreB = gameRow?.score_b != null ? Number(gameRow.score_b) : 0;
 
@@ -806,7 +902,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         lockHolderId = qHolderId;
         lockStepNo = stepNo;
       }
-      await client.query("UPDATE participants SET stat_quaffle_pickups = stat_quaffle_pickups + 1 WHERE id = $1 AND game_id = $2", [
+      await client.query("UPDATE participants SET stat_quaffle_pickups = COALESCE(stat_quaffle_pickups, 0) + 1 WHERE id = $1 AND game_id = $2", [
         pickerId,
         gameId
       ]);
@@ -860,10 +956,10 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
           lockHolderId = qHolderId;
           lockStepNo = stepNo;
         }
-        await client.query(
-          "UPDATE participants SET stat_quaffle_pickups = stat_quaffle_pickups + 1 WHERE id = $1 AND game_id = $2",
-          [p.id, gameId]
-        );
+        await client.query("UPDATE participants SET stat_quaffle_pickups = COALESCE(stat_quaffle_pickups, 0) + 1 WHERE id = $1 AND game_id = $2", [
+          p.id,
+          gameId
+        ]);
       }
       continue;
     }
@@ -914,6 +1010,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 
       if (targetIdx === 1) b1Pos = endPos;
       else b2Pos = endPos;
+      bludgersHitThisStep.add(targetIdx);
 
       await client.query(
         "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -941,7 +1038,10 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         lockHolderId = qHolderId;
         lockStepNo = stepNo;
       }
-      await client.query("UPDATE participants SET stat_quaffle_passes = stat_quaffle_passes + 1 WHERE id = $1 AND game_id = $2", [p.id, gameId]);
+      await client.query("UPDATE participants SET stat_quaffle_passes = COALESCE(stat_quaffle_passes, 0) + 1 WHERE id = $1 AND game_id = $2", [
+        p.id,
+        gameId
+      ]);
       continue;
     }
 
@@ -968,7 +1068,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
           if (receiver && receiver.team === p.team) {
             nextHolderId = chaserId;
             nextPos = null;
-            await client.query("UPDATE participants SET stat_quaffle_passes = stat_quaffle_passes + 1 WHERE id = $1 AND game_id = $2", [
+            await client.query("UPDATE participants SET stat_quaffle_passes = COALESCE(stat_quaffle_passes, 0) + 1 WHERE id = $1 AND game_id = $2", [
               p.id,
               gameId
             ]);
@@ -983,19 +1083,19 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         if (keeperId) {
           nextHolderId = keeperId;
           nextPos = null;
-          await client.query(
-            "UPDATE participants SET stat_goals_saved = stat_goals_saved + 1 WHERE id = $1 AND game_id = $2",
-            [keeperId, gameId]
-          );
+          await client.query("UPDATE participants SET stat_goals_saved = COALESCE(stat_goals_saved, 0) + 1 WHERE id = $1 AND game_id = $2", [
+            keeperId,
+            gameId
+          ]);
         } else {
           nextHolderId = null;
           nextPos = to;
           if (isTeamA) scoreA += 10;
           else if (isTeamB) scoreB += 10;
-          await client.query(
-            "UPDATE participants SET stat_goals_scored = stat_goals_scored + 1 WHERE id = $1 AND game_id = $2",
-            [p.id, gameId]
-          );
+          await client.query("UPDATE participants SET stat_goals_scored = COALESCE(stat_goals_scored, 0) + 1 WHERE id = $1 AND game_id = $2", [
+            p.id,
+            gameId
+          ]);
         }
       } else {
         continue;
@@ -1169,7 +1269,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         lockHolderId = qHolderId;
         lockStepNo = stepNo;
       }
-      await client.query("UPDATE participants SET stat_quaffle_pickups = stat_quaffle_pickups + 1 WHERE id = $1 AND game_id = $2", [
+      await client.query("UPDATE participants SET stat_quaffle_pickups = COALESCE(stat_quaffle_pickups, 0) + 1 WHERE id = $1 AND game_id = $2", [
         pickerId,
         gameId
       ]);
@@ -1245,7 +1345,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
           lockStepNo = stepNo;
         }
         await client.query(
-          "UPDATE participants SET stat_quaffle_pickups = stat_quaffle_pickups + 1 WHERE id = $1 AND game_id = $2",
+          "UPDATE participants SET stat_quaffle_pickups = COALESCE(stat_quaffle_pickups, 0) + 1 WHERE id = $1 AND game_id = $2",
           [p.id, gameId]
         );
       }
@@ -1298,6 +1398,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 
       if (targetIdx === 1) b1Pos = endPos;
       else b2Pos = endPos;
+      bludgersHitThisStep.add(targetIdx);
 
       await client.query(
         "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -1325,7 +1426,10 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         lockHolderId = qHolderId;
         lockStepNo = stepNo;
       }
-      await client.query("UPDATE participants SET stat_quaffle_passes = stat_quaffle_passes + 1 WHERE id = $1 AND game_id = $2", [p.id, gameId]);
+      await client.query("UPDATE participants SET stat_quaffle_passes = COALESCE(stat_quaffle_passes, 0) + 1 WHERE id = $1 AND game_id = $2", [
+        p.id,
+        gameId
+      ]);
       continue;
     }
 
@@ -1352,7 +1456,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
           if (receiver && receiver.team === p.team) {
             nextHolderId = chaserId;
             nextPos = null;
-            await client.query("UPDATE participants SET stat_quaffle_passes = stat_quaffle_passes + 1 WHERE id = $1 AND game_id = $2", [
+            await client.query("UPDATE participants SET stat_quaffle_passes = COALESCE(stat_quaffle_passes, 0) + 1 WHERE id = $1 AND game_id = $2", [
               p.id,
               gameId
             ]);
@@ -1367,19 +1471,19 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         if (keeperId) {
           nextHolderId = keeperId;
           nextPos = null;
-          await client.query(
-            "UPDATE participants SET stat_goals_saved = stat_goals_saved + 1 WHERE id = $1 AND game_id = $2",
-            [keeperId, gameId]
-          );
+          await client.query("UPDATE participants SET stat_goals_saved = COALESCE(stat_goals_saved, 0) + 1 WHERE id = $1 AND game_id = $2", [
+            keeperId,
+            gameId
+          ]);
         } else {
           nextHolderId = null;
           nextPos = to;
           if (isTeamA) scoreA += 10;
           else if (isTeamB) scoreB += 10;
-          await client.query(
-            "UPDATE participants SET stat_goals_scored = stat_goals_scored + 1 WHERE id = $1 AND game_id = $2",
-            [p.id, gameId]
-          );
+          await client.query("UPDATE participants SET stat_goals_scored = COALESCE(stat_goals_scored, 0) + 1 WHERE id = $1 AND game_id = $2", [
+            p.id,
+            gameId
+          ]);
         }
       } else {
         continue;
@@ -1419,7 +1523,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         snitchCaughtById = p.id;
         snitchCaughtStepNo = stepNo;
         await client.query(
-          "UPDATE participants SET stat_snitch_catches = stat_snitch_catches + 1 WHERE id = $1 AND game_id = $2",
+          "UPDATE participants SET stat_snitch_catches = COALESCE(stat_snitch_catches, 0) + 1 WHERE id = $1 AND game_id = $2",
           [p.id, gameId]
         );
         caughtByTeam = p.team;
@@ -1436,7 +1540,8 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
   const nextBludgers = moveBludgers({
     bludger1Pos: b1Pos,
     bludger2Pos: b2Pos,
-    forbidden: freeQuafflePos
+    forbidden: freeQuafflePos,
+    locked: bludgersHitThisStep
   });
 
   const stunnedSet = new Set(hitStunnedIds);
@@ -1807,18 +1912,19 @@ function moveBludgerOnce(fromCoord, forbiddenSet) {
   return candidates[idx] || null;
 }
 
-function moveBludgers({ bludger1Pos, bludger2Pos, forbidden }) {
+function moveBludgers({ bludger1Pos, bludger2Pos, forbidden, locked }) {
   const b1From = normalizeCoord(bludger1Pos) || "A7";
   const b2From = normalizeCoord(bludger2Pos) || "G7";
   const forbiddenCoord = normalizeCoord(forbidden);
   const forbiddenSet = new Set();
   if (forbiddenCoord) forbiddenSet.add(forbiddenCoord);
 
-  const b1To = moveBludgerOnce(b1From, forbiddenSet) || b1From;
+  const lockedSet = locked instanceof Set ? locked : new Set();
+  const b1To = lockedSet.has(1) ? b1From : (moveBludgerOnce(b1From, forbiddenSet) || b1From);
 
   const forbiddenSetB2 = new Set(forbiddenSet);
   forbiddenSetB2.add(b1To);
-  let b2To = moveBludgerOnce(b2From, forbiddenSetB2) || b2From;
+  let b2To = lockedSet.has(2) ? b2From : (moveBludgerOnce(b2From, forbiddenSetB2) || b2From);
   if (b2To === b1To) b2To = b2From;
   return { bludger1Pos: b1To, bludger2Pos: b2To };
 }
@@ -2056,7 +2162,7 @@ async function resolveDuelIfReady(client, duelRow) {
       [duelRow.game_id, winnerId, stepNo, expected]
     );
     if ((upd.rowCount || 0) > 0) {
-      await client.query("UPDATE participants SET stat_quaffle_pickups = stat_quaffle_pickups + 1 WHERE id = $1 AND game_id = $2", [
+      await client.query("UPDATE participants SET stat_quaffle_pickups = COALESCE(stat_quaffle_pickups, 0) + 1 WHERE id = $1 AND game_id = $2", [
         winnerId,
         duelRow.game_id
       ]);
@@ -2075,7 +2181,7 @@ async function resolveDuelIfReady(client, duelRow) {
       [duelRow.game_id, winnerId, stepNo, qHolderId]
     );
     if ((upd.rowCount || 0) > 0) {
-      await client.query("UPDATE participants SET stat_quaffle_steals = stat_quaffle_steals + 1 WHERE id = $1 AND game_id = $2", [
+      await client.query("UPDATE participants SET stat_quaffle_steals = COALESCE(stat_quaffle_steals, 0) + 1 WHERE id = $1 AND game_id = $2", [
         winnerId,
         duelRow.game_id
       ]);
@@ -2808,13 +2914,14 @@ app.post("/api/games/:code/bots/fill", async (req, res) => {
 
     const existingRes = await client.query(
       `
-        SELECT team, role
+        SELECT team, role, nickname
         FROM participants
-        WHERE game_id = $1 AND is_observer = FALSE AND role IS NOT NULL
+        WHERE game_id = $1 AND role IS NOT NULL
       `,
       [game.id]
     );
     const occupiedSlots = new Set(existingRes.rows.map((r) => `${r.team}:${r.role}`));
+    const usedNicknames = new Set(existingRes.rows.map((r) => String(r.nickname || "").trim()).filter(Boolean));
 
     let inserted = 0;
     for (const team of [game.team_a, game.team_b]) {
@@ -2824,9 +2931,10 @@ app.post("/api/games/:code/bots/fill", async (req, res) => {
         if (occupiedSlots.has(slotKey)) continue;
         const id = nanoidId();
         const pos = defaultSpawnCoord({ role: role.key, team, teamA: game.team_a, teamB: game.team_b });
+        const nickname = pickUniqueBotNickname({ roleKey: role.key, usedNicknames });
         await client.query(
           "INSERT INTO participants (id, game_id, nickname, team, role, pos, is_observer, is_bot, bot_difficulty) VALUES ($1, $2, $3, $4, $5, $6, FALSE, TRUE, $7)",
-          [id, game.id, `Бот ${BOT_DIFFICULTY_BY_LEVEL.get(difficulty)?.label || "Средний"}`, team, role.key, pos, difficulty]
+          [id, game.id, nickname, team, role.key, pos, difficulty]
         );
         await client.query(
           `
@@ -4406,12 +4514,15 @@ app.post("/api/judge/:judgeId/kick", async (req, res) => {
       const teamA = gameNowRes.rows[0]?.team_a || judge.team_a;
       const teamB = gameNowRes.rows[0]?.team_b || judge.team_b;
 
+      const usedRes = await client.query("SELECT nickname FROM participants WHERE game_id = $1", [judge.game_id]);
+      const usedNicknames = new Set(usedRes.rows.map((r) => String(r.nickname || "").trim()).filter(Boolean));
+
       botId = nanoidId();
       const pos = defaultSpawnCoord({ role, team, teamA, teamB });
-      const label = BOT_DIFFICULTY_BY_LEVEL.get(botDifficulty)?.label || "Средний";
+      const nickname = pickUniqueBotNickname({ roleKey: role, usedNicknames });
       await client.query(
         "INSERT INTO participants (id, game_id, nickname, team, role, pos, is_observer, is_bot, bot_difficulty, is_judge) VALUES ($1, $2, $3, $4, $5, $6, FALSE, TRUE, $7, FALSE)",
-        [botId, judge.game_id, `Бот ${label}`, team, role, pos, botDifficulty]
+        [botId, judge.game_id, nickname, team, role, pos, botDifficulty]
       );
       await client.query(
         `
@@ -4497,12 +4608,15 @@ app.post("/api/judge/:judgeId/bot", async (req, res) => {
     }
 
     const stepNo = Number(judge.step_no || 1);
+    const usedRes = await client.query("SELECT nickname FROM participants WHERE game_id = $1", [judge.game_id]);
+    const usedNicknames = new Set(usedRes.rows.map((r) => String(r.nickname || "").trim()).filter(Boolean));
+
     const botId = nanoidId();
     const pos = defaultSpawnCoord({ role, team, teamA: judge.team_a, teamB: judge.team_b });
-    const label = BOT_DIFFICULTY_BY_LEVEL.get(botDifficulty)?.label || "Средний";
+    const nickname = pickUniqueBotNickname({ roleKey: role, usedNicknames });
     await client.query(
       "INSERT INTO participants (id, game_id, nickname, team, role, pos, is_observer, is_bot, bot_difficulty, is_judge) VALUES ($1, $2, $3, $4, $5, $6, FALSE, TRUE, $7, FALSE)",
-      [botId, judge.game_id, `Бот ${label}`, team, role, pos, botDifficulty]
+      [botId, judge.game_id, nickname, team, role, pos, botDifficulty]
     );
     await client.query(
       `
@@ -4586,8 +4700,7 @@ app.post("/api/judge/:judgeId/bot/difficulty", async (req, res) => {
       return res.status(400).json({ error: "not_bot" });
     }
 
-    const label = BOT_DIFFICULTY_BY_LEVEL.get(botDifficulty)?.label || "Средний";
-    await client.query("UPDATE participants SET bot_difficulty = $2, nickname = $3 WHERE id = $1", [botId, botDifficulty, `Бот ${label}`]);
+    await client.query("UPDATE participants SET bot_difficulty = $2 WHERE id = $1", [botId, botDifficulty]);
 
     await client.query("COMMIT");
     res.json({ ok: true, botId, botDifficulty });

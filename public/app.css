@@ -628,6 +628,26 @@ button.primary {
   color: rgba(231, 241, 234, 0.95);
 }
 
+.eventName {
+  font-weight: 700;
+}
+
+.eventName.team-gryffindor {
+  color: #ff6b6b;
+}
+
+.eventName.team-hufflepuff {
+  color: #ffcf4d;
+}
+
+.eventName.team-ravenclaw {
+  color: #4ea1ff;
+}
+
+.eventName.team-slytherin {
+  color: #7ed08d;
+}
+
 @media (max-width: 900px) {
   .fieldLayout {
     flex-direction: column;

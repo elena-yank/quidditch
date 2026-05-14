@@ -1,12 +1,40 @@
 const MESSAGES = globalThis.QUIDDITCH_MESSAGES && typeof globalThis.QUIDDITCH_MESSAGES === "object" ? globalThis.QUIDDITCH_MESSAGES : {};
 
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function roleShort(roleKey) {
+  const k = String(roleKey || "").toLowerCase();
+  if (k === "keeper") return "В";
+  if (k === "seeker") return "Л";
+  if (k === "beater") return "З";
+  if (k === "chaser1") return "О1";
+  if (k === "chaser2") return "О2";
+  return "";
+}
+
+function participantNameHtml(p) {
+  const nickname = escapeHtml(p?.nickname || "Игрок");
+  const short = p && !p.is_observer ? roleShort(p.role) : "";
+  const suffix = short ? ` (${escapeHtml(short)})` : "";
+  const team = String(p?.team || "").toLowerCase();
+  const cls = team ? `eventName team-${team}` : "eventName";
+  return `<span class="${cls}">${nickname}${suffix}</span>`;
+}
+
 function renderEventLog() {
   if (!els.eventLog) return;
   els.eventLog.innerHTML = "";
   for (const msg of state.eventLog) {
     const line = document.createElement("div");
     line.className = "eventLine";
-    line.textContent = String(msg || "");
+    line.innerHTML = String(msg || "");
     els.eventLog.appendChild(line);
   }
   els.eventLog.scrollTop = els.eventLog.scrollHeight;
@@ -27,7 +55,7 @@ function replaceAllPlain(s, needle, replacement) {
 function freeQuafflePickupMessage(p) {
   const arr = Array.isArray(MESSAGES.FREE_QUAFFLE_PICKUP_MESSAGES) ? MESSAGES.FREE_QUAFFLE_PICKUP_MESSAGES : [];
   const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "[Имя игрока] подбирает квоффл!";
-  const name = p?.nickname || "Игрок";
+  const name = participantNameHtml(p);
   const team = teamLabel(p?.team);
   return replaceAllPlain(replaceAllPlain(tpl, "[Имя игрока]", name), "[Название команды игрока]", team);
 }
@@ -35,8 +63,8 @@ function freeQuafflePickupMessage(p) {
 function quafflePassMessage(passer, receiver) {
   const arr = Array.isArray(MESSAGES.QUAFFLE_PASS_MESSAGES) ? MESSAGES.QUAFFLE_PASS_MESSAGES : [];
   const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "[Имя игрока делающего пас] отдаёт пас!";
-  const passerName = passer?.nickname || "Игрок";
-  const receiverName = receiver?.nickname || "Игрок";
+  const passerName = participantNameHtml(passer);
+  const receiverName = participantNameHtml(receiver);
   let out = tpl;
   out = replaceAllPlain(out, "[Имя игрока делающего пас]", passerName);
   out = replaceAllPlain(out, "[Имя игрока принимающего пас]", receiverName);
@@ -47,7 +75,7 @@ function quafflePassMessage(passer, receiver) {
 function quaffleStealMessage(taker) {
   const arr = Array.isArray(MESSAGES.QUAFFLE_STEAL_MESSAGES) ? MESSAGES.QUAFFLE_STEAL_MESSAGES : [];
   const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "[Имя игрока] выхватывает квоффл!";
-  const name = taker?.nickname || "Игрок";
+  const name = participantNameHtml(taker);
   let out = tpl;
   out = replaceAllPlain(out, "[Имя игрока]", name);
   out = replaceAllPlain(out, "[Имя игррка]", name);
@@ -57,14 +85,14 @@ function quaffleStealMessage(taker) {
 function bludgerHitMessage(p) {
   const arr = Array.isArray(MESSAGES.BLUDGER_HIT_MESSAGES) ? MESSAGES.BLUDGER_HIT_MESSAGES : [];
   const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "[Имя игрока] бьёт по бладжеру!";
-  const name = p?.nickname || "Игрок";
+  const name = participantNameHtml(p);
   return replaceAllPlain(tpl, "[Имя игрока]", name);
 }
 
 function bludgerStunMessage(p) {
   const arr = Array.isArray(MESSAGES.BLUDGER_STUN_MESSAGES) ? MESSAGES.BLUDGER_STUN_MESSAGES : [];
   const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "[Имя игрока] оглушён бладжером!";
-  const name = p?.nickname || "Игрок";
+  const name = participantNameHtml(p);
   return replaceAllPlain(tpl, "[Имя игрока]", name);
 }
 

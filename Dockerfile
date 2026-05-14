@@ -7,6 +7,7 @@ RUN npm init -y >/dev/null \
   && npm i --omit=dev dotenv@16.6.1 express@4.21.2 nanoid@5.1.5 pg@8.16.3 >/dev/null
 
 COPY server.js ./server.js
+COPY bot.names.js ./bot.names.js
 COPY public ./public
 
 ENV NODE_ENV=production
