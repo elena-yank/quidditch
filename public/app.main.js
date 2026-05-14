@@ -2,6 +2,12 @@ async function refreshRoomOnce() {
   if (!state.roomCode) return;
   const res = await api.state(state.roomCode, state.session?.participantId || null);
   if (!res.ok) {
+    if (res.status === 403 && res.body?.error === "kicked") {
+      showToast("Тебя кикнул судья");
+      clearSession();
+      await goHome();
+      return;
+    }
     if (res.status === 404 || res.body?.error === "not_found") {
       showToast("Комната удалена");
       clearSession();
@@ -83,6 +89,7 @@ function resetRoomScopedState() {
   state.lastAutoEndedStepNo = null;
   state.lastStunnedStepNo = null;
   state.lastMoveTap = null;
+  state.resultsDismissed = false;
   state.draft = { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null };
   renderEventLog();
 }
@@ -92,6 +99,7 @@ async function goRoom(code) {
   if (state.roomCode !== nextRoom) resetRoomScopedState();
   state.roomCode = nextRoom;
   setView("room");
+  syncLeaveGameBtnLabel();
   await refreshRoomOnce();
   startRoomPolling();
 }
@@ -108,6 +116,7 @@ async function goHome() {
   }
   setView("home");
   setHomeTab("create");
+  syncLeaveGameBtnLabel();
 }
 
 function syncCreateTeamOptions() {
@@ -298,6 +307,21 @@ async function autoEndTurnIfNoMoreChoices(gameState) {
   await refreshRoomOnce();
 }
 
+const LEAVE_LABEL_FULL = "Выйти из игры";
+const LEAVE_LABEL_SHORT = "Выйти";
+
+function syncLeaveGameBtnLabel() {
+  const btn = els.leaveGameBtn;
+  if (!btn) return;
+  const isInRoom = document.body.classList.contains("inRoom");
+  if (!isInRoom) {
+    btn.textContent = LEAVE_LABEL_FULL;
+    return;
+  }
+  const isMobilePortrait = window.matchMedia && window.matchMedia("(max-width: 900px) and (orientation: portrait)").matches;
+  btn.textContent = isMobilePortrait ? LEAVE_LABEL_SHORT : LEAVE_LABEL_FULL;
+}
+
 async function bootstrap() {
   try {
     const [health, meta] = await Promise.all([api.health(), api.meta()]);
@@ -312,6 +336,14 @@ async function bootstrap() {
     state.session = loadSession();
     await setupHome();
     await ensureBoardPitchLayoutLoaded();
+    syncLeaveGameBtnLabel();
+    if (window.matchMedia) {
+      const mq = window.matchMedia("(max-width: 900px) and (orientation: portrait)");
+      if (mq && typeof mq.addEventListener === "function") mq.addEventListener("change", syncLeaveGameBtnLabel);
+      else window.addEventListener("resize", syncLeaveGameBtnLabel);
+    } else {
+      window.addEventListener("resize", syncLeaveGameBtnLabel);
+    }
 
     const wrap = els.board.closest?.(".boardWrap");
     if (wrap && els.duelOverlay.parentElement !== wrap) {
@@ -322,6 +354,30 @@ async function bootstrap() {
     }
     if (wrap && els.observersOverlay.parentElement !== wrap) {
       wrap.appendChild(els.observersOverlay);
+    }
+
+    if (els.resultsCloseBtn) {
+      els.resultsCloseBtn.addEventListener("click", () => {
+        state.resultsDismissed = true;
+        els.resultsOverlay?.classList.add("hidden");
+      });
+    }
+    if (els.resultsOverlay) {
+      els.resultsOverlay.addEventListener("click", (e) => {
+        if (e.target !== els.resultsOverlay) return;
+        state.resultsDismissed = true;
+        els.resultsOverlay.classList.add("hidden");
+      });
+    }
+    if (els.resultsSaveBtn) {
+      els.resultsSaveBtn.addEventListener("click", async () => {
+        try {
+          const code = String(state.roomCode || "results").trim().toUpperCase();
+          await saveElementAsPng(els.resultsCard, `quidditch-${code}-results.png`);
+        } catch {
+          showToast("Не удалось сохранить изображение");
+        }
+      });
     }
 
     els.leaveGameBtn.addEventListener("click", async () => {
@@ -335,15 +391,42 @@ async function bootstrap() {
       await goHome();
     });
 
+    els.startGameBtn.addEventListener("click", async () => {
+      const id = state.session?.participantId || null;
+      if (!id) return;
+      const res = await api.startGame(id);
+      if (!res.ok) {
+        if (res.status === 403 && res.body?.error === "not_judge") showToast("Только судья может начать игру");
+        else if (res.status === 403 && res.body?.error === "game_finished") showToast("Игра уже завершена");
+        else showToast("Не удалось начать игру");
+        await refreshRoomOnce();
+        return;
+      }
+      showToast("Игра началась");
+      await refreshRoomOnce();
+    });
+
     els.pickupQuaffleBtn.addEventListener("click", async () => {
       const gs = state.gameState;
       const myId = state.session?.participantId || null;
       const me = myId && gs ? gs.participants.find((p) => p.id === myId) : null;
-      state.draft.actionType = me && isKeeperRole(me.role) ? "keeper_pickup" : "pickup";
+      const nextType = me && isKeeperRole(me.role) ? "keeper_pickup" : "pickup";
+      if (state.draft?.actionType === nextType) {
+        state.draft.actionType = null;
+        state.draft.actionPickedAt = null;
+        state.draft.actionTo = null;
+        state.draft.actionBludger = null;
+        showToast("Заявка: действие отменено");
+        await refreshRoomOnce();
+        return;
+      }
+
+      state.draft.actionType = nextType;
       state.draft.actionPickedAt = Date.now();
       state.draft.actionTo = null;
       state.draft.actionBludger = null;
       showToast(me && isKeeperRole(me.role) ? "Заявка: поднять квоффл" : "Заявка: взять квоффл");
+      await refreshRoomOnce();
     });
 
     els.duelBar.addEventListener("click", async () => {
@@ -359,6 +442,11 @@ async function bootstrap() {
 
       const res = await api.submitSteal(myId, { duelId: state.duelUi.duelId, score });
       if (!res.ok) {
+        if (res.status === 403 && res.body?.error === "game_finished") {
+          showToast("Игра уже завершена");
+          await refreshRoomOnce();
+          return;
+        }
         els.duelHint.textContent = "Не удалось отправить результат";
         state.duelUi.submitted = false;
         startDuelAnimation();
@@ -533,12 +621,18 @@ async function bootstrap() {
         if (res.status === 400 && res.body?.error === "turn_ended") showToast("Ход уже завершен");
         else if (res.status === 400 && res.body?.error === "observer_cannot_end") showToast("Наблюдатель не ходит");
         else if (res.status === 400 && res.body?.error === "role_cannot_end") showToast("Эта роль не ходит");
+        else if (res.status === 403 && res.body?.error === "game_not_started") showToast("Ожидается начало игры");
+        else if (res.status === 403 && res.body?.error === "game_finished") showToast("Игра уже завершена");
+        else if (res.status === 400 && res.body?.error === "quaffle_in_goal_zone") showToast("В зоне ворот квоффл может брать только вратарь");
+        else if (res.status === 400 && res.body?.error === "cannot_steal_keeper") showToast("Нельзя выхватывать квоффл у вратаря в зоне ворот");
         else if (res.status === 400 && res.body?.error === "use_plans") showToast("Сейчас работает режим заявок");
         else if (res.status === 400 && res.body?.error === "illegal_move") showToast("Нельзя так переместиться");
         else if (res.status === 409 && res.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
         else if (res.status === 400 && res.body?.error === "too_far") showToast("Слишком далеко");
         else if (res.status === 400 && res.body?.error === "not_opponent_goal") showToast("Это не ворота противника");
         else if (res.status === 400 && res.body?.error === "no_quaffle") showToast("У тебя нет квоффла");
+        else if (res.status === 400 && res.body?.error === "steal_locked") showToast("Нельзя выхватить квоффл сразу после смены владельца");
+        else if (res.status === 400 && res.body?.error === "steal_cooldown") showToast("Сейчас нельзя выхватить квоффл");
         else showToast("Не удалось завершить ход");
         await refreshRoomOnce();
         return;

@@ -43,5 +43,28 @@ const api = {
     fetch(`/api/participants/${encodeURIComponent(id)}`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" }
+    }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() })),
+  startGame: (id) =>
+    fetch(`/api/participants/${encodeURIComponent(id)}/game/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() })),
+  judgeKick: (judgeId, payload) =>
+    fetch(`/api/judge/${encodeURIComponent(judgeId)}/kick`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {})
+    }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() })),
+  judgeAddBot: (judgeId, payload) =>
+    fetch(`/api/judge/${encodeURIComponent(judgeId)}/bot`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {})
+    }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() })),
+  judgeSetBotDifficulty: (judgeId, payload) =>
+    fetch(`/api/judge/${encodeURIComponent(judgeId)}/bot/difficulty`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {})
     }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() }))
 };

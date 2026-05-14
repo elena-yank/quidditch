@@ -173,6 +173,7 @@ function canPickupFreeQuaffle({ gameState, meRole, fromCoord }) {
   if (q.holderId) return false;
   if (!(isChaserRole(meRole) || isKeeperRole(meRole))) return false;
   const qPos = normalizeCoord(q.pos) || "D7";
+  if (isChaserRole(meRole) && GOALS_ALL_SET.has(qPos)) return false;
   const d = chebyshevDistance(fromCoord, qPos);
   return d != null && d <= 1;
 }
@@ -185,6 +186,7 @@ function canStealQuaffle({ gameState, me, fromCoord }) {
   if (q.holderId === me.id) return false;
   const holder = (gameState.participants || []).find((p) => p.id === q.holderId) || null;
   if (!holder || holder.is_observer) return false;
+  if (isKeeperRole(holder.role)) return false;
   if (holder.team === me.team) return false;
   const holderPos = normalizeCoord(holder.pos) || defaultSpawnCoord({ role: holder.role, team: holder.team, teamA: gameState.game.teamA, teamB: gameState.game.teamB });
   if (!holderPos) return false;

@@ -16,6 +16,10 @@
   --disabled: #6f8273;
 }
 
+html {
+  background: var(--bg);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -48,10 +52,11 @@ a {
 body:not(.inRoom) .container {
   max-width: none;
   min-height: 100vh;
+  min-height: 100svh;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 18px;
   padding: 24px 16px;
 }
@@ -69,6 +74,7 @@ body:not(.inRoom) header {
   justify-content: center;
   align-items: center;
   padding-bottom: 0;
+  margin-top: auto;
 }
 
 .headerRight {
@@ -118,6 +124,40 @@ body.inRoom #pageLogo {
   display: none;
 }
 
+@media (max-width: 900px) and (orientation: portrait) {
+  body:not(.inRoom) .container {
+    padding-top: calc(env(safe-area-inset-top, 0px) + clamp(44px, 10svh, 120px));
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
+    padding-left: 0;
+    padding-right: 0;
+    gap: 14px;
+  }
+
+  body:not(.inRoom) header {
+    padding-left: calc(env(safe-area-inset-left, 0px) + 16px);
+    padding-right: calc(env(safe-area-inset-right, 0px) + 16px);
+  }
+
+  body:not(.inRoom) #homeView {
+    width: 100%;
+  }
+
+  body:not(.inRoom) #homeView .card {
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+
+  #pageLogo {
+    height: clamp(80px, 20svh, 190px);
+    max-width: 92vw;
+  }
+
+  body:not(.inRoom) .tabPanel[data-panel="create"] .row.two {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 body:not(.inRoom) #pageTitleText {
   display: none;
 }
@@ -150,6 +190,7 @@ body.inRoom #pageSubtitle {
 
 body:not(.inRoom) #homeView {
   width: min(760px, 100%);
+  margin-bottom: auto;
 }
 
 body:not(.inRoom) #homeView .card {
@@ -214,6 +255,20 @@ body:not(.inRoom) #homeView .card {
   margin-top: 10px;
 }
 
+.formActions {
+  margin-top: 10px;
+  width: 100%;
+}
+
+.formActions button {
+  width: 100%;
+  justify-content: center;
+}
+
+.gridSpacer {
+  display: none;
+}
+
 @media (min-width: 900px) {
   .grid {
     grid-template-columns: 1fr 1fr;
@@ -221,6 +276,9 @@ body:not(.inRoom) #homeView .card {
   }
   .row.two {
     grid-template-columns: 1fr 1fr;
+  }
+  .gridSpacer {
+    display: block;
   }
 }
 
@@ -428,6 +486,60 @@ button:disabled {
   overflow: hidden;
 }
 
+.startOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 5;
+}
+
+.startOverlayCard {
+  background: rgba(16, 28, 22, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  width: min(380px, calc(100% - 24px));
+  text-align: center;
+}
+
+.startOverlayTitle {
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  margin-bottom: 6px;
+}
+
+.startOverlayText {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+button.primary {
+  border-color: rgba(126, 208, 141, 0.55);
+  box-shadow: 0 0 0 3px rgba(126, 208, 141, 0.12);
+  background: rgba(126, 208, 141, 0.12);
+}
+
+.sidePanel button.picked {
+  border-color: rgba(126, 208, 141, 0.65);
+  box-shadow: 0 0 0 3px rgba(126, 208, 141, 0.14);
+  background: rgba(126, 208, 141, 0.12);
+}
+
+.sidePanel button.sent {
+  border-color: rgba(126, 208, 141, 0.55);
+  box-shadow: 0 0 0 3px rgba(126, 208, 141, 0.10);
+  background: rgba(126, 208, 141, 0.08);
+}
+
+.sidePanel button.sent:disabled {
+  background: rgba(126, 208, 141, 0.08);
+  color: rgba(231, 241, 234, 0.85);
+}
+
 .fieldLayout {
   display: flex;
   align-items: flex-start;
@@ -519,6 +631,10 @@ button:disabled {
 @media (max-width: 900px) {
   .fieldLayout {
     flex-direction: column;
+    align-items: stretch;
+  }
+  .boardWrap {
+    width: 100%;
   }
   .sidePanel {
     max-width: none;
@@ -543,6 +659,148 @@ button:disabled {
 
   .eventLog {
     height: 220px;
+  }
+}
+
+@media (max-width: 900px) and (orientation: portrait) {
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
+  body.inRoom .container {
+    padding-top: calc(env(safe-area-inset-top, 0px) + clamp(16px, 6svh, 64px));
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+    padding-left: 0;
+    padding-right: 0;
+    margin-left: 0;
+    margin-right: 0;
+    max-width: none;
+  }
+
+  body.inRoom header {
+    padding-bottom: 12px;
+    padding-left: calc(env(safe-area-inset-left, 0px) + 16px);
+    padding-right: calc(env(safe-area-inset-right, 0px) + 16px);
+  }
+
+  body.inRoom .headerRight {
+    flex-direction: column;
+    align-items: flex-end;
+  }
+
+  body.inRoom #leaveGameBtn {
+    order: 0;
+    width: auto;
+  }
+
+  body.inRoom #roomCodePill {
+    order: 1;
+  }
+
+  body.inRoom #roomView .card {
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+
+  body.inRoom .boardWrap {
+    margin-left: -14px;
+    margin-right: -14px;
+    width: calc(100% + 28px);
+  }
+
+  body.inRoom .board {
+    max-width: none;
+    border-radius: 0;
+  }
+
+  body.inRoom .cell {
+    font-size: clamp(9px, 2.8vw, 12px);
+  }
+
+  body.inRoom .cell span {
+    top: clamp(1px, 0.6vw, 3px);
+    left: clamp(1px, 0.6vw, 3px);
+    font-size: clamp(6px, 1.9vw, 8px);
+    line-height: 1;
+    letter-spacing: 0;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  body.inRoom .cell::after {
+    border-radius: clamp(4px, 1.3vw, 6px);
+  }
+
+  body.inRoom .cell.gate {
+    box-shadow: inset 0 0 0 clamp(2px, 0.9vw, 3px) rgba(231, 241, 234, 0.35);
+  }
+
+  body.inRoom .cell.gateA {
+    box-shadow: inset 0 0 0 clamp(2px, 0.9vw, 3px) rgba(var(--teamA), 0.55);
+  }
+
+  body.inRoom .cell.gateB {
+    box-shadow: inset 0 0 0 clamp(2px, 0.9vw, 3px) rgba(var(--teamB), 0.55);
+  }
+
+  body.inRoom .cell.throwTarget::after {
+    border-width: clamp(2px, 0.9vw, 3px);
+  }
+
+  body.inRoom .cell.passTarget::after {
+    border-width: clamp(2px, 0.9vw, 3px);
+  }
+
+  body.inRoom .cell.planned::after {
+    border-width: clamp(2px, 0.9vw, 3px);
+  }
+
+  body.inRoom .cell.hitTarget::after {
+    border-width: clamp(2px, 0.9vw, 3px);
+  }
+
+  body.inRoom .cell.blocked::before {
+    inset: clamp(1px, 0.6vw, 2px);
+    border-radius: clamp(4px, 1.3vw, 6px);
+  }
+
+  body.inRoom .piece {
+    width: clamp(12px, 4.6vw, 18px);
+    height: clamp(12px, 4.6vw, 18px);
+    border-width: clamp(1px, 0.7vw, 2px);
+    font-size: clamp(9px, 2.4vw, 11px);
+  }
+
+  body.inRoom .piece.selected {
+    box-shadow: 0 0 0 clamp(2px, 1vw, 4px) rgba(126, 208, 141, 0.18);
+  }
+
+  body.inRoom .quaffle {
+    width: clamp(13px, 5vw, 19px);
+    height: clamp(13px, 5vw, 19px);
+    border-width: clamp(1px, 0.7vw, 2px);
+  }
+
+  body.inRoom .bludger {
+    width: clamp(12px, 4.4vw, 17px);
+    height: clamp(12px, 4.4vw, 17px);
+    border-width: clamp(1px, 0.7vw, 2px);
+  }
+
+  body.inRoom .snitch {
+    width: clamp(9px, 3vw, 12px);
+    height: clamp(9px, 3vw, 12px);
+    border-width: clamp(1px, 0.7vw, 2px);
+  }
+
+  body.inRoom .quaffleBadge {
+    width: clamp(7px, 2.4vw, 10px);
+    height: clamp(7px, 2.4vw, 10px);
+    border-width: clamp(1px, 0.7vw, 2px);
+    right: clamp(-3px, -0.8vw, -2px);
+    bottom: clamp(-3px, -0.8vw, -2px);
   }
 }
 
@@ -805,6 +1063,59 @@ button:disabled {
   width: min(720px, calc(100% - 24px));
 }
 
+.resultsCard {
+  width: min(980px, calc(100% - 24px));
+}
+
+.resultsMeta {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.resultsTableWrap {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.12);
+  overflow: auto;
+  max-height: min(60vh, 560px);
+}
+
+.resultsTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.resultsTable th,
+.resultsTable td {
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.resultsTable th {
+  position: sticky;
+  top: 0;
+  background: rgba(16, 28, 22, 0.95);
+  z-index: 1;
+  font-weight: 700;
+}
+
+.resultsTeamRow td {
+  background: rgba(0, 0, 0, 0.18);
+  font-weight: 700;
+}
+
+.resultsActions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+
 .modalHead {
   display: flex;
   justify-content: space-between;
@@ -896,8 +1207,28 @@ button:disabled {
 .pInfo {
   color: var(--muted);
   font-size: 12px;
-  margin-left: auto;
   text-align: right;
+}
+
+.pRight {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pActions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pActions button {
+  width: auto;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1;
 }
 
 @media (max-width: 700px) {

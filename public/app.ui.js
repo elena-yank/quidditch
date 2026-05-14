@@ -523,17 +523,31 @@ function updateQuaffleUi(gameState) {
   els.stealQuaffleBtn.classList.add("hidden");
   els.passQuaffleBtn.classList.add("hidden");
   els.hitBludgerBtn.classList.add("hidden");
+  els.pickupQuaffleBtn.classList.remove("picked", "sent");
+  els.stealQuaffleBtn.classList.remove("picked", "sent");
+  els.passQuaffleBtn.classList.remove("picked", "sent");
+  els.hitBludgerBtn.classList.remove("picked", "sent");
   els.pickupQuaffleBtn.disabled = true;
   els.stealQuaffleBtn.disabled = true;
   els.passQuaffleBtn.disabled = true;
   els.hitBludgerBtn.disabled = true;
+  els.pickupQuaffleBtn.setAttribute("aria-pressed", "false");
+  els.stealQuaffleBtn.setAttribute("aria-pressed", "false");
+  els.passQuaffleBtn.setAttribute("aria-pressed", "false");
+  els.hitBludgerBtn.setAttribute("aria-pressed", "false");
 
   const ts = myId && gameState.turnStates ? gameState.turnStates[myId] : null;
   const turnEnded = !!ts?.ended;
   const actionReserved = !!ts?.actionReserved;
+  const plannedType = ts?.plannedActionType || null;
+  const chosenType = state.draft?.actionType || null;
+  const showSentType = turnEnded ? plannedType : null;
 
-  if (turnEnded || actionReserved) return;
   if (!me || me.is_observer) return;
+  if (actionReserved) return;
+
+  const showSent = Boolean(showSentType);
+  if (turnEnded && !showSent) return;
 
   const myPos0 = normalizeCoord(me.pos) || defaultSpawnCoord({ role: me.role, team: me.team, teamA: gameState.game.teamA, teamB: gameState.game.teamB });
   const myPos = normalizeCoord(state.draft?.to) || myPos0;
@@ -545,9 +559,15 @@ function updateQuaffleUi(gameState) {
     const b2 = normalizeCoord(arr[1]);
     const near1 = b1 ? chebyshevDistance(myPos, b1) === 1 : false;
     const near2 = b2 ? chebyshevDistance(myPos, b2) === 1 : false;
-    if (near1 || near2) {
+    const wantHit = chosenType === "hit_bludger";
+    const sentHit = showSentType === "hit_bludger";
+    if (sentHit || near1 || near2) {
       els.hitBludgerBtn.classList.remove("hidden");
-      els.hitBludgerBtn.disabled = false;
+      els.hitBludgerBtn.disabled = showSent || !(near1 || near2);
+      els.hitBludgerBtn.textContent = sentHit ? "Ударить бладжер ✓" : (wantHit ? "Отменить удар" : "Ударить бладжер");
+      els.hitBludgerBtn.classList.toggle("picked", wantHit && !showSent);
+      els.hitBludgerBtn.classList.toggle("sent", sentHit);
+      els.hitBludgerBtn.setAttribute("aria-pressed", wantHit || sentHit ? "true" : "false");
     }
     return;
   }
@@ -558,30 +578,53 @@ function updateQuaffleUi(gameState) {
     const qPos = normalizeCoord(q.pos) || "D7";
     const d = chebyshevDistance(myPos, qPos);
     const can = d != null && d <= 1;
-    if (can) {
+    const wantPickup = chosenType === "pickup" || chosenType === "keeper_pickup";
+    const sentPickup = showSentType === "pickup" || showSentType === "keeper_pickup";
+    if (sentPickup || can) {
       els.pickupQuaffleBtn.classList.remove("hidden");
-      els.pickupQuaffleBtn.disabled = false;
-      els.pickupQuaffleBtn.textContent = isKeeperRole(me.role) ? "Поднять Квоффл" : "Взять Квоффл";
+      els.pickupQuaffleBtn.disabled = showSent || !can;
+      const base = isKeeperRole(me.role) ? "Поднять Квоффл" : "Взять Квоффл";
+      els.pickupQuaffleBtn.textContent = sentPickup ? `${base} ✓` : (wantPickup ? `Отменить: ${base}` : base);
+      els.pickupQuaffleBtn.classList.toggle("picked", wantPickup && !showSent);
+      els.pickupQuaffleBtn.classList.toggle("sent", sentPickup);
+      els.pickupQuaffleBtn.setAttribute("aria-pressed", wantPickup || sentPickup ? "true" : "false");
     }
     return;
   }
 
   if (isChaserRole(me.role)) {
     const canSteal = canStealQuaffle({ gameState, me, fromCoord: myPos });
-    if (canSteal) {
+    const wantSteal = chosenType === "steal";
+    const sentSteal = showSentType === "steal";
+    if (sentSteal || canSteal) {
       els.stealQuaffleBtn.classList.remove("hidden");
-      els.stealQuaffleBtn.disabled = false;
-      els.stealQuaffleBtn.textContent = state.draft?.actionType === "steal" ? "Отменить выхват" : "Выхватить Квоффл";
+      els.stealQuaffleBtn.disabled = showSent || !canSteal;
+      els.stealQuaffleBtn.textContent = sentSteal ? "Выхватить Квоффл ✓" : (wantSteal ? "Отменить выхват" : "Выхватить Квоффл");
+      els.stealQuaffleBtn.classList.toggle("picked", wantSteal && !showSent);
+      els.stealQuaffleBtn.classList.toggle("sent", sentSteal);
+      els.stealQuaffleBtn.setAttribute("aria-pressed", wantSteal || sentSteal ? "true" : "false");
     }
   }
 
   const hasQuaffle = q.holderId === me.id;
   if (isChaserRole(me.role) && hasQuaffle) {
     const coords = passTargetsForChaser({ gameState, me, fromCoord: myPos });
-    if (coords.length > 0) {
+    const wantPass = chosenType === "pass";
+    const sentPass = showSentType === "pass";
+    const sentThrow = showSentType === "throw";
+    if (sentPass || sentThrow || coords.length > 0) {
       els.passQuaffleBtn.classList.remove("hidden");
-      els.passQuaffleBtn.disabled = false;
-      els.passQuaffleBtn.textContent = state.draft?.actionType === "pass" ? "Отменить пас" : "Дать пас";
+      els.passQuaffleBtn.disabled = showSent || coords.length === 0;
+      if (sentThrow) {
+        els.passQuaffleBtn.textContent = "Бросок ✓";
+      } else if (sentPass) {
+        els.passQuaffleBtn.textContent = "Дать пас ✓";
+      } else {
+        els.passQuaffleBtn.textContent = wantPass ? "Отменить пас" : "Дать пас";
+      }
+      els.passQuaffleBtn.classList.toggle("picked", wantPass && !showSent);
+      els.passQuaffleBtn.classList.toggle("sent", sentPass || sentThrow);
+      els.passQuaffleBtn.setAttribute("aria-pressed", wantPass || sentPass || sentThrow ? "true" : "false");
     }
   }
 }
@@ -753,7 +796,8 @@ function renderPieces(gameState) {
     if (cellEl.classList.contains("planned") && myPlanCoordNow && myPlanCoordNow === to) {
       const res = await api.planMove(state.selected.participantId, { to: null });
       if (!res.ok) {
-        if (res.status === 400 && res.body?.error === "turn_ended") showToast("Ты уже отправил заявку");
+        if (res.status === 403 && res.body?.error === "game_not_started") showToast("Ожидается начало игры");
+        else if (res.status === 400 && res.body?.error === "turn_ended") showToast("Ты уже отправил заявку");
         else showToast("Не удалось отменить перемещение");
         await refreshRoomOnce();
         return;
@@ -782,7 +826,8 @@ function renderPieces(gameState) {
 
       const planRes = await api.planMove(pid, { to: coord });
       if (!planRes.ok) {
-        if (planRes.status === 409 && planRes.body?.error === "cell_reserved") showToast("Эту клетку уже заняли");
+        if (planRes.status === 403 && planRes.body?.error === "game_not_started") showToast("Ожидается начало игры");
+        else if (planRes.status === 409 && planRes.body?.error === "cell_reserved") showToast("Эту клетку уже заняли");
         else if (planRes.status === 409 && planRes.body?.error === "cell_taken") showToast("Клетка занята");
         else if (planRes.status === 400 && planRes.body?.error === "illegal_move") showToast("Нельзя так переместиться");
         else if (planRes.status === 400 && planRes.body?.error === "turn_ended") showToast("Ты уже отправил заявку");
@@ -793,7 +838,8 @@ function renderPieces(gameState) {
 
       const endRes = await api.endTurn(pid, { to: coord, actionType: null, actionTo: null, actionBludger: null });
       if (!endRes.ok) {
-        if (endRes.status === 400 && endRes.body?.error === "turn_ended") showToast("Ход уже завершен");
+        if (endRes.status === 403 && endRes.body?.error === "game_not_started") showToast("Ожидается начало игры");
+        else if (endRes.status === 400 && endRes.body?.error === "turn_ended") showToast("Ход уже завершен");
         else if (endRes.status === 409 && endRes.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
         else showToast("Не удалось завершить ход");
         await refreshRoomOnce();
@@ -814,7 +860,9 @@ function renderPieces(gameState) {
         (async () => {
           const res = await api.planMove(pid, { to: coord });
           if (!res.ok) {
-            if (res.status === 409 && res.body?.error === "cell_reserved") showToast("Эту клетку уже заняли");
+            if (res.status === 403 && res.body?.error === "game_not_started") showToast("Ожидается начало игры");
+            else if (res.status === 403 && res.body?.error === "game_finished") showToast("Игра уже завершена");
+            else if (res.status === 409 && res.body?.error === "cell_reserved") showToast("Эту клетку уже заняли");
             else if (res.status === 409 && res.body?.error === "cell_taken") showToast("Клетка занята");
             else if (res.status === 400 && res.body?.error === "illegal_move") showToast("Нельзя так переместиться");
             else if (res.status === 400 && res.body?.error === "turn_ended") showToast("Ты уже отправил заявку");
@@ -846,6 +894,380 @@ function participantTitle(p) {
   return `${p.nickname} · ${mode}${bot} · ${teamLabel(p.team)}${role}`;
 }
 
+function pickBotDifficulty(defaultLevel = 2) {
+  const levels = (Array.isArray(BOT_DIFFICULTIES) ? BOT_DIFFICULTIES : []).map((d) => Number(d.level)).filter((n) => Number.isFinite(n));
+  const fallback = levels.includes(defaultLevel) ? defaultLevel : (levels[0] || 2);
+  const raw = prompt(`Уровень бота (${levels.join(", ")}):`, String(fallback));
+  if (raw == null) return null;
+  const n = Number(String(raw).trim());
+  if (!Number.isFinite(n)) return fallback;
+  if (levels.length && !levels.includes(n)) return fallback;
+  return n;
+}
+
+function renderResults(gameState) {
+  if (!els.resultsOverlay || !els.resultsTableWrap) return;
+  const finished = Boolean(gameState?.game?.finished);
+  const dismissed = Boolean(state?.resultsDismissed);
+  els.resultsOverlay.classList.toggle("hidden", !finished || dismissed);
+  if (!finished || dismissed) return;
+
+  const results = gameState?.results || null;
+  const a = Number(gameState?.game?.scoreA ?? 0);
+  const b = Number(gameState?.game?.scoreB ?? 0);
+  const stepNo = gameState?.game?.stepNo ?? null;
+
+  const winnerTeam = results?.winnerTeam || null;
+  if (els.resultsTitle) {
+    els.resultsTitle.textContent = winnerTeam ? `Победа: ${teamLabel(winnerTeam)}` : "Игра завершена";
+  }
+  if (els.resultsMeta) {
+    els.resultsMeta.textContent = `Счёт: ${a} — ${b}${stepNo != null ? ` · Ход: ${stepNo}` : ""}`;
+  }
+
+  const makeRow = (cells, isHeader = false) => {
+    const tr = document.createElement("tr");
+    for (const c of cells) {
+      const td = document.createElement(isHeader ? "th" : "td");
+      td.textContent = c;
+      tr.appendChild(td);
+    }
+    return tr;
+  };
+
+  const table = document.createElement("table");
+  table.className = "resultsTable";
+  const thead = document.createElement("thead");
+  thead.appendChild(
+    makeRow(["Имя", "Роль", "Взято квоффлов", "Украдено квоффлов", "Пасы", "Поймано голов", "Поймано снитчей", "Очки"], true)
+  );
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+
+  const addTeam = (teamKey, arr) => {
+    const teamRow = document.createElement("tr");
+    teamRow.className = "resultsTeamRow";
+    const td = document.createElement("td");
+    td.colSpan = 8;
+    td.textContent = teamLabel(teamKey);
+    teamRow.appendChild(td);
+    tbody.appendChild(teamRow);
+
+    for (const p of arr) {
+      tbody.appendChild(
+        makeRow([
+          p.nickname || "Игрок",
+          roleLabel(p.role),
+          String(p?.stats?.pickups ?? 0),
+          String(p?.stats?.steals ?? 0),
+          String(p?.stats?.passes ?? 0),
+          String(p?.stats?.goalsSaved ?? 0),
+          String(p?.stats?.snitches ?? 0),
+          String(p?.stats?.points ?? 0)
+        ])
+      );
+    }
+  };
+
+  const teamA = results?.teamA?.team || gameState?.game?.teamA || null;
+  const teamB = results?.teamB?.team || gameState?.game?.teamB || null;
+  const aPlayers = Array.isArray(results?.teamA?.players) ? results.teamA.players : [];
+  const bPlayers = Array.isArray(results?.teamB?.players) ? results.teamB.players : [];
+  if (teamA) addTeam(teamA, aPlayers);
+  if (teamB) addTeam(teamB, bPlayers);
+
+  table.appendChild(tbody);
+  els.resultsTableWrap.innerHTML = "";
+  els.resultsTableWrap.appendChild(table);
+}
+
+async function saveElementAsPng(element, filename = "results.png") {
+  const el = element;
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  const width = Math.max(1, Math.ceil(Math.max(rect.width || 0, el.scrollWidth || 0)));
+  const height = Math.max(1, Math.ceil(Math.max(rect.height || 0, el.scrollHeight || 0)));
+  const bg = "rgba(16, 28, 22, 0.98)";
+  const exportScale = Math.max(2, Math.round(window.devicePixelRatio || 1));
+
+  const escapeXml = (s) =>
+    String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
+
+  const getLogoDataUrl = async () => {
+    try {
+      const cached = saveElementAsPng._logoDataUrl || null;
+      if (cached) return cached;
+      const res = await fetch("/src/logo.svg", { cache: "force-cache" });
+      if (!res.ok) return null;
+      const svgText = await res.text();
+      const b64 = btoa(unescape(encodeURIComponent(svgText)));
+      const url = `data:image/svg+xml;base64,${b64}`;
+      saveElementAsPng._logoDataUrl = url;
+      return url;
+    } catch {
+      return null;
+    }
+  };
+
+  const pngFromSvg = async (svg, targetW, targetH) => {
+    const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = new Image();
+      img.decoding = "async";
+      const loaded = new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+      });
+      img.src = url;
+      await loaded;
+
+      const canvas = document.createElement("canvas");
+      const w = Math.max(1, Math.ceil(Number(targetW) || 0));
+      const h = Math.max(1, Math.ceil(Number(targetH) || 0));
+      canvas.width = w * exportScale;
+      canvas.height = h * exportScale;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return false;
+      ctx.setTransform(exportScale, 0, 0, exportScale, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.fillStyle = "#101c16";
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+
+      const pngUrl = canvas.toDataURL("image/png");
+      const a = document.createElement("a");
+      a.href = pngUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  };
+
+  const makeForeignObjectSvg = () => {
+    const svgEl = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svgEl.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    svgEl.setAttribute("width", String(width));
+    svgEl.setAttribute("height", String(height));
+
+    const fo = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
+    fo.setAttribute("width", "100%");
+    fo.setAttribute("height", "100%");
+
+    const div = document.createElement("div");
+    div.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+
+    const style = document.createElement("style");
+    style.textContent = `
+      *{box-sizing:border-box;}
+      body{margin:0;}
+      .overlayCard{background:${bg};color:#e7f1ea;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
+      .resultsTable{width:100%;border-collapse:collapse;font-size:13px;}
+      .resultsTable th,.resultsTable td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,0.12);text-align:left;white-space:nowrap;}
+      .resultsTeamRow td{background:rgba(0,0,0,0.18);font-weight:700;}
+      .modalClose,.resultsActions{display:none !important;}
+    `;
+
+    const clone = el.cloneNode(true);
+    const close = clone?.querySelector?.(".modalClose");
+    if (close) close.style.display = "none";
+    const actions = clone?.querySelector?.(".resultsActions");
+    if (actions) actions.style.display = "none";
+
+    div.appendChild(style);
+    div.appendChild(clone);
+    fo.appendChild(div);
+    svgEl.appendChild(fo);
+
+    const svgBody = new XMLSerializer().serializeToString(svgEl);
+    return `<?xml version="1.0" encoding="UTF-8"?>\n${svgBody}`;
+  };
+
+  const makePlainTableSvg = () => {
+    const font = "13px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+    const boldFont = "700 13px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+    const measureCanvas = document.createElement("canvas");
+    const mctx = measureCanvas.getContext("2d");
+
+    const titleText = el.querySelector?.(".modalTitle")?.textContent || "Игра завершена";
+    const metaText = el.querySelector?.("#resultsMeta")?.textContent || "";
+
+    const table = el.querySelector?.("table.resultsTable");
+    if (!table) return null;
+
+    const headCells = Array.from(table.querySelectorAll("thead th")).map((th) => String(th.textContent || "").trim());
+    const colCount = headCells.length || 8;
+
+    const bodyRows = Array.from(table.querySelectorAll("tbody tr")).map((tr) => {
+      const isTeam = tr.classList.contains("resultsTeamRow");
+      if (isTeam) {
+        const t = tr.querySelector("td")?.textContent || "";
+        return { kind: "team", text: String(t).trim() };
+      }
+      const tds = Array.from(tr.querySelectorAll("td")).map((td) => String(td.textContent || "").trim());
+      while (tds.length < colCount) tds.push("");
+      return { kind: "row", cells: tds.slice(0, colCount) };
+    });
+
+    const colWidths = new Array(colCount).fill(60);
+    const padX = 10;
+    const left = 16;
+    const right = 16;
+    const top = 16;
+    const bottom = 16;
+    const titleH = 24;
+    const metaH = metaText ? 18 : 0;
+    const gap = 10;
+    const headerH = 30;
+    const rowH = 28;
+    const teamH = 26;
+
+    const measure = (text, isBold = false) => {
+      mctx.font = isBold ? boldFont : font;
+      return Math.ceil(mctx.measureText(String(text || "")).width);
+    };
+
+    for (let i = 0; i < colCount; i += 1) {
+      const w = measure(headCells[i] || "", true) + padX * 2;
+      colWidths[i] = Math.max(colWidths[i], w);
+    }
+    for (const r of bodyRows) {
+      if (r.kind !== "row") continue;
+      for (let i = 0; i < colCount; i += 1) {
+        const w = measure(r.cells[i] || "", false) + padX * 2;
+        colWidths[i] = Math.max(colWidths[i], w);
+      }
+    }
+
+    const tableW = colWidths.reduce((a, b) => a + b, 0);
+    const totalW = left + tableW + right;
+    const contentTop = top + titleH + (metaH ? metaH + 4 : 0) + gap;
+    const tableH =
+      headerH +
+      bodyRows.reduce((sum, r) => sum + (r.kind === "team" ? teamH : rowH), 0) +
+      0;
+    const logoGap = 26;
+    const logoW = 240;
+    const logoH = 86;
+    const logoY = contentTop + tableH + logoGap;
+    const totalH = logoY + logoH + bottom;
+
+    const useW = totalW;
+    const useH = totalH;
+
+    let x = left;
+    const xs = [];
+    for (const w of colWidths) {
+      xs.push(x);
+      x += w;
+    }
+
+    const textY = (y, h) => y + Math.floor(h / 2) + 5;
+
+    let y = top;
+    let out = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+    out += `<svg xmlns="http://www.w3.org/2000/svg" width="${useW}" height="${useH}">`;
+    out += `<rect x="0" y="0" width="${useW}" height="${useH}" fill="#101c16"/>`;
+
+    out += `<text x="${left}" y="${y + 18}" fill="#e7f1ea" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-size="18" font-weight="700">${escapeXml(titleText)}</text>`;
+    y += titleH;
+    if (metaText) {
+      out += `<text x="${left}" y="${y + 14}" fill="rgba(231,241,234,0.85)" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-size="13">${escapeXml(metaText)}</text>`;
+      y += metaH + 4;
+    }
+    y += gap;
+
+    out += `<rect x="${left}" y="${y}" width="${tableW}" height="${headerH}" fill="rgba(255,255,255,0.10)"/>`;
+    for (let i = 0; i < colCount; i += 1) {
+      out += `<text x="${xs[i] + padX}" y="${textY(y, headerH)}" fill="#e7f1ea" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-size="13" font-weight="700">${escapeXml(headCells[i] || "")}</text>`;
+    }
+    y += headerH;
+
+    const line = (x1, y1, x2, y2, a = 0.12) =>
+      `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="rgba(255,255,255,${a})" stroke-width="1"/>`;
+
+    out += line(left, y, left + tableW, y);
+    for (const r of bodyRows) {
+      if (r.kind === "team") {
+        out += `<rect x="${left}" y="${y}" width="${tableW}" height="${teamH}" fill="rgba(0,0,0,0.18)"/>`;
+        out += `<text x="${left + padX}" y="${textY(y, teamH)}" fill="#e7f1ea" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-size="13" font-weight="700">${escapeXml(r.text)}</text>`;
+        y += teamH;
+        out += line(left, y, left + tableW, y);
+        continue;
+      }
+      for (let i = 0; i < colCount; i += 1) {
+        out += `<text x="${xs[i] + padX}" y="${textY(y, rowH)}" fill="#e7f1ea" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-size="13">${escapeXml(r.cells[i] || "")}</text>`;
+      }
+      y += rowH;
+      out += line(left, y, left + tableW, y);
+    }
+
+    let vx = left;
+    for (const w of colWidths) {
+      out += line(vx, contentTop, vx, contentTop + tableH, 0.10);
+      vx += w;
+    }
+    out += line(left + tableW, contentTop, left + tableW, contentTop + tableH, 0.10);
+
+    if (makePlainTableSvg._logoDataUrl) {
+      const logoX = Math.max(left, Math.floor((useW - logoW) / 2));
+      out += `<image x="${logoX}" y="${logoY}" width="${logoW}" height="${logoH}" href="${makePlainTableSvg._logoDataUrl}" preserveAspectRatio="xMidYMid meet"/>`;
+    }
+
+    out += `</svg>`;
+    return { svg: out, width: useW, height: useH };
+  };
+
+  const foSvg = makeForeignObjectSvg();
+  const okFo = await pngFromSvg(foSvg, width, height);
+  if (okFo) return;
+
+  const logoDataUrl = await getLogoDataUrl();
+  makePlainTableSvg._logoDataUrl = logoDataUrl ? escapeXml(logoDataUrl) : null;
+  const plain = makePlainTableSvg();
+  if (plain?.svg) {
+    try {
+      const okPlain = await pngFromSvg(plain.svg, plain.width, plain.height);
+      if (okPlain) return;
+    } catch {
+      const svgName = String(filename || "results.png").replace(/\.png$/i, ".svg");
+      const blob = new Blob([plain.svg], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = svgName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return;
+    }
+  }
+
+  const svgName = String(filename || "results.png").replace(/\.png$/i, ".svg");
+  const blob = new Blob([foSvg], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = svgName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return;
+}
+
 function renderParticipants(gameState) {
   if (!els.participantsTeamAList || !els.participantsTeamBList) return;
 
@@ -859,15 +1281,14 @@ function renderParticipants(gameState) {
   els.participantsTeamALabel.style.color = aRgb ? `rgb(${aRgb})` : "";
   els.participantsTeamBLabel.style.color = bRgb ? `rgb(${bRgb})` : "";
 
+  const myId = state.session?.participantId || null;
+  const me = myId ? gameState.participants.find((p) => p.id === myId) : null;
+  const hasJudge = (gameState.participants || []).some((p) => Boolean(p.is_judge));
+  const canManage = Boolean(me?.is_judge) && hasJudge;
+
   const ts = gameState.turnStates || {};
-  const listA = [];
-  const listB = [];
-  for (const p of gameState.participants || []) {
-    if (p.is_observer) continue;
-    if (!p.team) continue;
-    if (p.team === teamAKey) listA.push(p);
-    else if (p.team === teamBKey) listB.push(p);
-  }
+  const listA = (gameState.participants || []).filter((p) => !p.is_observer && p.team === teamAKey);
+  const listB = (gameState.participants || []).filter((p) => !p.is_observer && p.team === teamBKey);
 
   const endedA = listA.filter((p) => !!ts?.[p.id]?.ended).length;
   const endedB = listB.filter((p) => !!ts?.[p.id]?.ended).length;
@@ -876,26 +1297,150 @@ function renderParticipants(gameState) {
 
   const renderList = (root, arr, colorRgb) => {
     root.innerHTML = "";
+    if (!hasJudge) {
+      for (const p of arr) {
+        const row = document.createElement("div");
+        row.className = "pRow";
+
+        const dot = document.createElement("div");
+        const done = !!ts?.[p.id]?.ended;
+        dot.className = `turnDot ${done ? "done" : "wait"}`;
+
+        const name = document.createElement("div");
+        name.className = "pName";
+        name.textContent = p.nickname || (p.is_bot ? "Бот" : "Игрок");
+        name.style.color = colorRgb ? `rgb(${colorRgb})` : "";
+
+        const info = document.createElement("div");
+        info.className = "pInfo";
+        info.textContent = p.role ? roleLabel(p.role) : "";
+
+        row.appendChild(dot);
+        row.appendChild(name);
+        row.appendChild(info);
+        root.appendChild(row);
+      }
+      return;
+    }
+
+    const roleOrderBase = ["keeper", "chaser1", "chaser2", "beater", "seeker"];
+    const roleOrder = roleOrderBase.filter((r) => ROLES.has(r)).length ? roleOrderBase.filter((r) => ROLES.has(r)) : roleOrderBase;
+    const byRole = new Map();
     for (const p of arr) {
+      if (!p.role) continue;
+      byRole.set(p.role, p);
+    }
+
+    for (const roleKey of roleOrder) {
+      const p = byRole.get(roleKey) || null;
       const row = document.createElement("div");
       row.className = "pRow";
 
       const dot = document.createElement("div");
-      const done = !!ts?.[p.id]?.ended;
+      const done = p ? !!ts?.[p.id]?.ended : false;
       dot.className = `turnDot ${done ? "done" : "wait"}`;
 
       const name = document.createElement("div");
       name.className = "pName";
-      name.textContent = p.nickname || "Игрок";
+      name.textContent = p ? (p.nickname || (p.is_bot ? "Бот" : "Игрок")) : "Пусто";
       name.style.color = colorRgb ? `rgb(${colorRgb})` : "";
 
       const info = document.createElement("div");
       info.className = "pInfo";
-      info.textContent = p.role ? roleLabel(p.role) : "";
+      info.textContent = roleLabel(roleKey);
+
+      const right = document.createElement("div");
+      right.className = "pRight";
+
+      right.appendChild(info);
+
+      if (canManage) {
+        const actions = document.createElement("div");
+        actions.className = "pActions";
+        if (p) {
+          const kick = document.createElement("button");
+          kick.type = "button";
+          kick.className = "danger";
+          kick.textContent = "Кик";
+          kick.addEventListener("click", async () => {
+            const ok = confirm(`Кикнуть игрока с роли ${roleLabel(roleKey)}?`);
+            if (!ok) return;
+            const res = await api.judgeKick(me.id, { targetId: p.id, replace: "empty" });
+            if (!res.ok) {
+              showToast("Не удалось кикнуть");
+              await refreshRoomOnce();
+              return;
+            }
+            showToast("Игрок кикнут");
+            await refreshRoomOnce();
+          });
+
+          const kickBot = document.createElement("button");
+          kickBot.type = "button";
+          kickBot.textContent = "Кик+бот";
+          kickBot.addEventListener("click", async () => {
+            const lvl = pickBotDifficulty(2);
+            if (lvl == null) return;
+            const ok = confirm(`Кикнуть и заменить ботом на роли ${roleLabel(roleKey)}?`);
+            if (!ok) return;
+            const res = await api.judgeKick(me.id, { targetId: p.id, replace: "bot", botDifficulty: lvl });
+            if (!res.ok) {
+              showToast("Не удалось заменить ботом");
+              await refreshRoomOnce();
+              return;
+            }
+            showToast("Заменено ботом");
+            await refreshRoomOnce();
+          });
+
+          actions.appendChild(kick);
+          actions.appendChild(kickBot);
+
+          if (p.is_bot) {
+            const diffBtn = document.createElement("button");
+            diffBtn.type = "button";
+            diffBtn.textContent = "Сложность";
+            diffBtn.addEventListener("click", async () => {
+              const current = p.bot_difficulty != null ? Number(p.bot_difficulty) : 2;
+              const lvl = pickBotDifficulty(current);
+              if (lvl == null) return;
+              const res = await api.judgeSetBotDifficulty(me.id, { botId: p.id, botDifficulty: lvl });
+              if (!res.ok) {
+                showToast("Не удалось сменить сложность");
+                await refreshRoomOnce();
+                return;
+              }
+              showToast("Сложность изменена");
+              await refreshRoomOnce();
+            });
+            actions.appendChild(diffBtn);
+          }
+        } else {
+          const add = document.createElement("button");
+          add.type = "button";
+          add.textContent = "+бот";
+          add.addEventListener("click", async () => {
+            const lvl = pickBotDifficulty(2);
+            if (lvl == null) return;
+            const team = root === els.participantsTeamAList ? teamAKey : teamBKey;
+            const res = await api.judgeAddBot(me.id, { team, role: roleKey, botDifficulty: lvl });
+            if (!res.ok) {
+              if (res.status === 409 && res.body?.error === "slot_taken") showToast("Роль уже занята");
+              else showToast("Не удалось добавить бота");
+              await refreshRoomOnce();
+              return;
+            }
+            showToast("Бот добавлен");
+            await refreshRoomOnce();
+          });
+          actions.appendChild(add);
+        }
+        right.appendChild(actions);
+      }
 
       row.appendChild(dot);
       row.appendChild(name);
-      row.appendChild(info);
+      row.appendChild(right);
       root.appendChild(row);
     }
   };
@@ -926,7 +1471,7 @@ function renderObservers(gameState) {
 
     const info = document.createElement("div");
     info.className = "pInfo";
-    info.textContent = "наблюдатель";
+    info.textContent = p.is_judge ? "судья" : "наблюдатель";
 
     row.appendChild(dot);
     row.appendChild(name);
@@ -947,13 +1492,33 @@ function renderMe(gameState) {
     return null;
   }
   if (me.is_observer) {
-    els.meLabel.textContent = me.nickname ? String(me.nickname) : "Наблюдатель";
+    const nick = me.nickname ? String(me.nickname) : (me.is_judge ? "Судья" : "Наблюдатель");
+    els.meLabel.textContent = me.is_judge ? `${nick} · Судья` : nick;
   } else {
     const nick = me.nickname ? String(me.nickname) : "Игрок";
     const role = me.role ? roleLabel(me.role) : "";
     els.meLabel.textContent = role ? `${nick} · ${role}` : nick;
   }
   return me;
+}
+
+function updateStartLockUi(gameState, me) {
+  const started = Boolean(gameState?.game?.started);
+  const finished = Boolean(gameState?.game?.finished);
+  const isJudge = Boolean(me?.is_judge);
+  const isPlayer = Boolean(me && !me.is_observer);
+  const locked = Boolean((!started && isPlayer && !isJudge) || finished);
+
+  if (els.startOverlay) els.startOverlay.classList.toggle("hidden", finished ? true : !locked);
+  if (els.startGameBtn) els.startGameBtn.classList.toggle("hidden", started || !isJudge || finished);
+
+  if (locked) {
+    els.pickupQuaffleBtn.disabled = true;
+    els.stealQuaffleBtn.disabled = true;
+    els.passQuaffleBtn.disabled = true;
+    els.hitBludgerBtn.disabled = true;
+    els.endTurnBtn.disabled = true;
+  }
 }
 
 function renderRolePicker(gameState, me) {
@@ -992,6 +1557,8 @@ function renderRoom(gameState) {
   renderSnitch(gameState);
   renderPieces(gameState);
   updateQuaffleUi(gameState);
+  updateStartLockUi(gameState, me);
+  renderResults(gameState);
   if (gameState.duel && state.session?.participantId) {
     openDuelOverlay(gameState.duel, state.session.participantId);
   } else if (state.duelUi && state.duelUi.phase === "active") {
@@ -999,5 +1566,5 @@ function renderRoom(gameState) {
     stopDuelAnimation();
     state.duelUi = null;
   }
-  autoEndTurnIfNoMoreChoices(gameState).catch(() => {});
+  if (Boolean(gameState?.game?.started) && !Boolean(gameState?.game?.finished)) autoEndTurnIfNoMoreChoices(gameState).catch(() => {});
 }
