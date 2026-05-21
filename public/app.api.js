@@ -66,5 +66,10 @@ const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload || {})
+    }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() })),
+  judgePause: (judgeId) =>
+    fetch(`/api/judge/${encodeURIComponent(judgeId)}/pause`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
     }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() }))
 };

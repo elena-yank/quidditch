@@ -77,7 +77,7 @@
               <div class="row">
                 <label>
                   Имя
-                  <input id="createNick" placeholder="например, Гарри" autocomplete="off" />
+                  <input id="createNick" placeholder="например, Гарри" autocomplete="off" maxlength="24" required />
                 </label>
               </div>
             </div>
@@ -134,7 +134,7 @@
                 <div class="gridSpacer"></div>
                 <label>
                   Имя
-                  <input id="joinNick" placeholder="например, Дин" autocomplete="off" />
+                  <input id="joinNick" placeholder="например, Дин" autocomplete="off" maxlength="24" required />
                 </label>
                 <div class="gridSpacer"></div>
                 <div class="rowAction">
@@ -154,7 +154,7 @@
             <div class="row">
               <label>
                 Имя
-                <input id="watchNick" placeholder="например, Луна" autocomplete="off" />
+                <input id="watchNick" placeholder="например, Луна" autocomplete="off" maxlength="24" required />
               </label>
             </div>
             <div class="actions">
@@ -180,7 +180,17 @@
               <button class="h2Btn" id="participantsOpenBtn" type="button">Участники</button>
               <button class="h2Btn h2SubBtn" id="observersOpenBtn" type="button">Наблюдатели</button>
             </div>
-            <div class="pill mePill" id="meLabel"></div>
+            <div class="sectionTitleRight">
+              <div class="pill stepPill" id="stepStatus">Ход: —</div>
+              <button class="pillBtn iconOnly" id="exportLogsBtn" title="Экспортировать логи игры" type="button" aria-label="Экспортировать логи игры">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 16V4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                  <path d="M8 12l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                  <path d="M4 20h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                </svg>
+              </button>
+              <div class="pill mePill" id="meLabel"></div>
+            </div>
           </div>
 
           <div class="hr"></div>
@@ -200,12 +210,14 @@
             <div class="sidePanel" id="sidePanel">
               <div class="sideTopArea" id="sideTopArea">
                 <div class="sideStack sideStatusRow">
-                  <div class="pill" id="stepStatus">Ход: —</div>
+                  <div class="pill" id="snitchStatus">Снитч: —</div>
                   <div class="pill" id="scoreStatus">Счёт: —</div>
                 </div>
-                <div class="sideStack sideActions">
+                <div class="sideStack sideActions" id="sideActions">
+                  <button id="pauseBtn" class="hidden" disabled>Пауза</button>
                   <button id="pickupQuaffleBtn" disabled>Взять Квоффл</button>
                   <button id="stealQuaffleBtn" disabled>Выхватить Квоффл</button>
+                  <div id="stealLockedMessage" class="stealLockedMessage hidden">Нельзя выхватить квоффл сразу после смены владельца</div>
                   <button id="passQuaffleBtn" disabled>Дать пас</button>
                   <button id="hitBludgerBtn" disabled>Ударить бладжер</button>
                   <button id="startGameBtn" class="primary hidden" type="button">Начать игру</button>

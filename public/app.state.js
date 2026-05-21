@@ -178,6 +178,16 @@ function canPickupFreeQuaffle({ gameState, meRole, fromCoord }) {
   return d != null && d <= 1;
 }
 
+function isStealQuaffleLocked({ gameState }) {
+  const lockHolderId = gameState.game?.quaffleLockHolderId || null;
+  const lockStepNo = gameState.game?.quaffleLockStepNo != null ? Number(gameState.game.quaffleLockStepNo) : null;
+  const currentStepNo = gameState.game?.stepNo != null ? Number(gameState.game.stepNo) : null;
+  if (lockHolderId && lockStepNo != null && currentStepNo != null) {
+    if (currentStepNo === lockStepNo + 1) return true;
+  }
+  return false;
+}
+
 function canStealQuaffle({ gameState, me, fromCoord }) {
   if (!me || me.is_observer) return false;
   if (!isChaserRole(me.role)) return false;
@@ -188,6 +198,7 @@ function canStealQuaffle({ gameState, me, fromCoord }) {
   if (!holder || holder.is_observer) return false;
   if (isKeeperRole(holder.role)) return false;
   if (holder.team === me.team) return false;
+  if (isStealQuaffleLocked({ gameState })) return false;
   const holderPos = normalizeCoord(holder.pos) || defaultSpawnCoord({ role: holder.role, team: holder.team, teamA: gameState.game.teamA, teamB: gameState.game.teamB });
   if (!holderPos) return false;
   const d = chebyshevDistance(fromCoord, holderPos);

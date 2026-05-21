@@ -31,6 +31,8 @@ const els = {
   pitch: $("pitch"),
   startOverlay: $("startOverlay"),
   stepStatus: $("stepStatus"),
+  exportLogsBtn: $("exportLogsBtn"),
+  snitchStatus: $("snitchStatus"),
   scoreStatus: $("scoreStatus"),
   sidePanel: $("sidePanel"),
   sideTopArea: $("sideTopArea"),
@@ -38,10 +40,12 @@ const els = {
   eventLog: $("eventLog"),
   pickupQuaffleBtn: $("pickupQuaffleBtn"),
   stealQuaffleBtn: $("stealQuaffleBtn"),
+  stealLockedMessage: $("stealLockedMessage"),
   passQuaffleBtn: $("passQuaffleBtn"),
   hitBludgerBtn: $("hitBludgerBtn"),
   startGameBtn: $("startGameBtn"),
   endTurnBtn: $("endTurnBtn"),
+  pauseBtn: $("pauseBtn"),
   duelOverlay: $("duelOverlay"),
   duelTitle: $("duelTitle"),
   duelBar: $("duelBar"),
@@ -181,12 +185,10 @@ function syncSidePanelHeight() {
   els.sidePanel.style.height = `${h}px`;
 
   const dCell = els.board.querySelector("[data-coord='D13']");
-  const gCell = els.board.querySelector("[data-coord='G13']");
-  if (!dCell || !gCell) return;
+  if (!dCell) return;
   const dRect = dCell.getBoundingClientRect();
-  const gRect = gCell.getBoundingClientRect();
   const top = Math.round(dRect.top - panelRect.top);
-  const bottom = Math.round(gRect.bottom - panelRect.top);
+  const bottom = Math.round(boardRect.bottom - panelRect.top);
   const height = bottom - top;
   if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) return;
 

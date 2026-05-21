@@ -414,8 +414,13 @@ button:disabled {
   gap: 12px;
 }
 
+.sectionTitleRight {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .mePill {
-  margin-left: auto;
   text-align: right;
 }
 
@@ -580,6 +585,18 @@ button.primary {
   justify-content: center;
 }
 
+.stealLockedMessage {
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.3;
+  color: rgba(231, 241, 234, 0.8);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(231, 241, 234, 0.15);
+  text-align: center;
+}
+
 .sidePanel .pill {
   width: 100%;
   justify-content: space-between;
@@ -623,7 +640,7 @@ button.primary {
 }
 
 .eventLine {
-  font-size: 13px;
+  font-size: 11px;
   line-height: 1.25;
   color: rgba(231, 241, 234, 0.95);
 }
@@ -769,6 +786,69 @@ button.primary {
     border-width: clamp(2px, 0.9vw, 3px);
   }
 
+  body.inRoom .cell.throwSelected::after {
+    border-width: clamp(3px, 1.1vw, 4px);
+    background: rgba(176, 53, 74, 0.22);
+    animation: throw-selected-pulse-mobile 0.8s ease-in-out infinite alternate;
+  }
+
+  body.inRoom .cell.gateA.throwTarget::after {
+    border-color: rgba(var(--teamA), 0.85);
+  }
+
+  body.inRoom .cell.gateA.throwTarget:hover::after {
+    background: rgba(var(--teamA), 0.16);
+    border-color: rgba(var(--teamA), 1);
+  }
+
+  body.inRoom .cell.gateB.throwTarget::after {
+    border-color: rgba(var(--teamB), 0.85);
+  }
+
+  body.inRoom .cell.gateB.throwTarget:hover::after {
+    background: rgba(var(--teamB), 0.16);
+    border-color: rgba(var(--teamB), 1);
+  }
+
+  body.inRoom .cell.gateA.throwSelected::after {
+    border-color: rgba(var(--teamA), 1);
+    background: rgba(var(--teamA), 0.22);
+    animation: throw-selected-pulse-mobile-teamA 0.8s ease-in-out infinite alternate;
+  }
+
+  body.inRoom .cell.gateB.throwSelected::after {
+    border-color: rgba(var(--teamB), 1);
+    background: rgba(var(--teamB), 0.22);
+    animation: throw-selected-pulse-mobile-teamB 0.8s ease-in-out infinite alternate;
+  }
+
+  @keyframes throw-selected-pulse-mobile {
+    from {
+      box-shadow: 0 0 0 0 rgba(176, 53, 74, 0.45);
+    }
+    to {
+      box-shadow: 0 0 0 clamp(4px, 1.5vw, 6px) rgba(176, 53, 74, 0);
+    }
+  }
+
+  @keyframes throw-selected-pulse-mobile-teamA {
+    from {
+      box-shadow: 0 0 0 0 rgba(var(--teamA), 0.45);
+    }
+    to {
+      box-shadow: 0 0 0 clamp(4px, 1.5vw, 6px) rgba(var(--teamA), 0);
+    }
+  }
+
+  @keyframes throw-selected-pulse-mobile-teamB {
+    from {
+      box-shadow: 0 0 0 0 rgba(var(--teamB), 0.45);
+    }
+    to {
+      box-shadow: 0 0 0 clamp(4px, 1.5vw, 6px) rgba(var(--teamB), 0);
+    }
+  }
+
   body.inRoom .cell.passTarget::after {
     border-width: clamp(2px, 0.9vw, 3px);
   }
@@ -795,6 +875,29 @@ button.primary {
 
   body.inRoom .piece.selected {
     box-shadow: 0 0 0 clamp(2px, 1vw, 4px) rgba(126, 208, 141, 0.18);
+  }
+
+  body.inRoom .piece.me {
+    --meTeam: 126, 208, 141;
+    box-shadow: 0 0 0 clamp(2px, 1vw, 3px) rgba(var(--meTeam), 0.9), 0 0 clamp(6px, 2vw, 8px) rgba(var(--meTeam), 0.45);
+    border-color: rgba(var(--meTeam), 1);
+    background: rgba(var(--meTeam), 0.16);
+  }
+
+  body.inRoom .piece.me.teamA {
+    --meTeam: var(--teamA);
+  }
+
+  body.inRoom .piece.me.teamB {
+    --meTeam: var(--teamB);
+  }
+
+  body.inRoom .piece.stunned {
+    opacity: 0.45;
+    filter: grayscale(100%);
+    border-style: dashed;
+    border-color: rgba(231, 241, 234, 0.4);
+    background: rgba(0, 0, 0, 0.25);
   }
 
   body.inRoom .quaffle {
@@ -894,8 +997,76 @@ button.primary {
   box-shadow: inset 0 0 0 3px rgba(var(--teamB), 0.55);
 }
 
+.cell.throwTarget:hover::after {
+  background: rgba(176, 53, 74, 0.16);
+  border-color: rgba(176, 53, 74, 1);
+}
+
 .cell.throwTarget::after {
   border: 3px solid rgba(176, 53, 74, 0.85);
+}
+
+.cell.gateA.throwTarget::after {
+  border-color: rgba(var(--teamA), 0.85);
+}
+
+.cell.gateA.throwTarget:hover::after {
+  background: rgba(var(--teamA), 0.16);
+  border-color: rgba(var(--teamA), 1);
+}
+
+.cell.gateB.throwTarget::after {
+  border-color: rgba(var(--teamB), 0.85);
+}
+
+.cell.gateB.throwTarget:hover::after {
+  background: rgba(var(--teamB), 0.16);
+  border-color: rgba(var(--teamB), 1);
+}
+
+.cell.throwSelected::after {
+  border: 4px solid rgba(176, 53, 74, 1);
+  background: rgba(176, 53, 74, 0.22);
+  animation: throw-selected-pulse 0.8s ease-in-out infinite alternate;
+}
+
+.cell.gateA.throwSelected::after {
+  border-color: rgba(var(--teamA), 1);
+  background: rgba(var(--teamA), 0.22);
+  animation: throw-selected-pulse-teamA 0.8s ease-in-out infinite alternate;
+}
+
+.cell.gateB.throwSelected::after {
+  border-color: rgba(var(--teamB), 1);
+  background: rgba(var(--teamB), 0.22);
+  animation: throw-selected-pulse-teamB 0.8s ease-in-out infinite alternate;
+}
+
+@keyframes throw-selected-pulse {
+  from {
+    box-shadow: 0 0 0 0 rgba(176, 53, 74, 0.45);
+  }
+  to {
+    box-shadow: 0 0 0 6px rgba(176, 53, 74, 0);
+  }
+}
+
+@keyframes throw-selected-pulse-teamA {
+  from {
+    box-shadow: 0 0 0 0 rgba(var(--teamA), 0.45);
+  }
+  to {
+    box-shadow: 0 0 0 6px rgba(var(--teamA), 0);
+  }
+}
+
+@keyframes throw-selected-pulse-teamB {
+  from {
+    box-shadow: 0 0 0 0 rgba(var(--teamB), 0.45);
+  }
+  to {
+    box-shadow: 0 0 0 6px rgba(var(--teamB), 0);
+  }
 }
 
 .cell.passTarget::after {
@@ -986,7 +1157,8 @@ button.primary {
   width: 18px;
   height: 18px;
   border-radius: 999px;
-  background: radial-gradient(circle at 30% 30%, #ffe38b, #d09b1f);
+  background-color: #ffe38b;
+  background-image: radial-gradient(circle at 30% 30%, #ffe38b, #d09b1f);
   border: 2px solid rgba(0, 0, 0, 0.25);
   box-shadow: 0 6px 14px rgba(0, 0, 0, 0.2);
 }
@@ -1009,6 +1181,29 @@ button.primary {
 
 .piece.selected {
   box-shadow: 0 0 0 4px rgba(126, 208, 141, 0.18);
+}
+
+.piece.me {
+  --meTeam: 126, 208, 141;
+  box-shadow: 0 0 0 3px rgba(var(--meTeam), 0.9), 0 0 12px rgba(var(--meTeam), 0.45);
+  border-color: rgba(var(--meTeam), 1);
+  background: rgba(var(--meTeam), 0.16);
+}
+
+.piece.me.teamA {
+  --meTeam: var(--teamA);
+}
+
+.piece.me.teamB {
+  --meTeam: var(--teamB);
+}
+
+.piece.stunned {
+  opacity: 0.45;
+  filter: grayscale(100%);
+  border-style: dashed;
+  border-color: rgba(231, 241, 234, 0.4);
+  background: rgba(0, 0, 0, 0.25);
 }
 
 .toast {
@@ -1220,8 +1415,9 @@ button.primary {
 }
 
 .pName {
-  font-weight: 700;
+  font-weight: 400;
   letter-spacing: 0.2px;
+  font-size: 14px;
 }
 
 .pInfo {
@@ -1252,7 +1448,68 @@ button.primary {
 }
 
 @media (max-width: 700px) {
+  #participantsOverlay.overlay,
+  #observersOverlay.overlay {
+    position: fixed;
+    inset: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 12px;
+    display: block;
+  }
+
   .participantsGrid {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    overflow-y: auto;
+    max-height: min(60vh, 500px);
+  }
+  .teamBlock {
+    padding: 8px;
+  }
+  .teamHead {
+    margin-bottom: 6px;
+  }
+  .teamName {
+    font-size: 13px;
+  }
+  .teamMeta {
+    font-size: 11px;
+  }
+  .pList {
+    gap: 6px;
+  }
+  .pRow {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+  .pName {
+    font-size: 12px;
+  }
+  .pInfo {
+    font-size: 10px;
+  }
+  .participantsCard {
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100dvh - 24px);
+    overflow: hidden;
+  }
+  .participantsCard > .modalHead {
+    flex-shrink: 0;
+  }
+  .participantsCard > .participantsGrid {
+    flex: 1 1 auto;
+    min-height: 0;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+  }
+  .participantsCard > .pList {
+    overflow-y: auto;
+    flex-grow: 1;
+    max-height: min(60vh, 500px);
+    min-height: 0;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
   }
 }

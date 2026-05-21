@@ -142,7 +142,7 @@ const SNITCH_SPAWNS_SET = new Set(SNITCH_SPAWNS);
 
 function safeNickname(input) {
   const value = typeof input === "string" ? input.trim() : "";
-  if (!value) return "Гость";
+  if (!value) return null;
   return value.slice(0, 24);
 }
 
@@ -398,6 +398,7 @@ async function initDb() {
         winner_team TEXT NULL,
         score_a INTEGER NOT NULL DEFAULT 0,
         score_b INTEGER NOT NULL DEFAULT 0,
+        paused BOOLEAN NOT NULL DEFAULT FALSE,
         snitch_pos TEXT NULL,
         snitch_revealed BOOLEAN NOT NULL DEFAULT FALSE,
         snitch_caught_by_id TEXT NULL,
@@ -418,8 +419,10 @@ async function initDb() {
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS finished BOOLEAN`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS winner_team TEXT`);
+    await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS paused BOOLEAN`);
     await client.query(`UPDATE games SET started = TRUE WHERE started IS NULL`);
     await client.query(`UPDATE games SET finished = FALSE WHERE finished IS NULL`);
+    await client.query(`UPDATE games SET paused = FALSE WHERE paused IS NULL`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS score_a INTEGER`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS score_b INTEGER`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS snitch_pos TEXT`);
@@ -459,6 +462,18 @@ async function initDb() {
       );
     `);
     await client.query(`CREATE INDEX IF NOT EXISTS game_events_game_created_idx ON game_events (game_id, created_at DESC)`);
+    
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS game_state_snapshots (
+        id TEXT PRIMARY KEY,
+        game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        step_no INTEGER NOT NULL,
+        state JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS game_state_snapshots_game_step_idx ON game_state_snapshots (game_id, step_no)`);
+    
     await client.query(`
       CREATE TABLE IF NOT EXISTS participants (
         id TEXT PRIMARY KEY,
@@ -1092,6 +1107,13 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
           nextPos = to;
           if (isTeamA) scoreA += 10;
           else if (isTeamB) scoreB += 10;
+          const keeper = defenderTeam ? participants.find((pp) => pp.team === defenderTeam && isKeeperRole(pp.role)) : null;
+          if (keeper?.id) {
+            await client.query(
+              "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+              [nanoidId(), gameId, stepNo, "goal", keeper.id, null, to]
+            );
+          }
           await client.query("UPDATE participants SET stat_goals_scored = COALESCE(stat_goals_scored, 0) + 1 WHERE id = $1 AND game_id = $2", [
             p.id,
             gameId
@@ -1480,6 +1502,13 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
           nextPos = to;
           if (isTeamA) scoreA += 10;
           else if (isTeamB) scoreB += 10;
+          const keeper = defenderTeam ? participants.find((pp) => pp.team === defenderTeam && isKeeperRole(pp.role)) : null;
+          if (keeper?.id) {
+            await client.query(
+              "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+              [nanoidId(), gameId, stepNo, "goal", keeper.id, null, to]
+            );
+          }
           await client.query("UPDATE participants SET stat_goals_scored = COALESCE(stat_goals_scored, 0) + 1 WHERE id = $1 AND game_id = $2", [
             p.id,
             gameId
@@ -1573,6 +1602,10 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 
   const nextStep = stepNo + 1;
   const snitchForbidden = new Set(occupied);
+  for (const p of participants) {
+    const reserved = normalizeCoord(p.planned_to);
+    if (reserved) snitchForbidden.add(reserved);
+  }
   snitchForbidden.add(nextBludgers.bludger1Pos);
   snitchForbidden.add(nextBludgers.bludger2Pos);
   if (!nextQuaffleHolderId) {
@@ -1624,6 +1657,12 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     else if (snitchRevealed && allFar) nextSnitchRevealed = false;
   }
 
+  nextSnitchPos = normalizeCoord(nextSnitchPos) || nextSnitchPos;
+  if (nextSnitchPos && snitchForbidden.has(nextSnitchPos)) {
+    const fixed = findNearestFreeCoord(nextSnitchPos, snitchForbidden);
+    nextSnitchPos = fixed || pickSnitchRespawnCoord({ seekerA: null, seekerB: null, forbidden: snitchForbidden });
+  }
+
   const winA = scoreA >= 100;
   const winB = scoreB >= 100;
   const finishedNow = winA || winB;
@@ -1633,6 +1672,35 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     else if (winB && !winA) winnerTeam = gameForSpawn.team_b;
     else if (winA && winB) winnerTeam = scoreA === scoreB ? null : (scoreA > scoreB ? gameForSpawn.team_a : gameForSpawn.team_b);
   }
+
+  const snapshotState = {
+    stepNo: stepNo,
+    scoreA: scoreA,
+    scoreB: scoreB,
+    quaffleHolderId: qHolderId,
+    quafflePos: qPos,
+    bludger1Pos: b1Pos,
+    bludger2Pos: b2Pos,
+    snitchPos: snitchPos,
+    snitchRevealed: snitchRevealed,
+    snitchCaughtById: snitchCaughtById,
+    teamA: gameForSpawn.team_a,
+    teamB: gameForSpawn.team_b,
+    participants: participants.map(p => ({
+      id: p.id,
+      nickname: p.nickname,
+      team: p.team,
+      role: p.role,
+      pos: posById.get(p.id) || null,
+      isBot: Boolean(p.is_bot),
+      stunned: Boolean(p.stunned)
+    }))
+  };
+
+  await client.query(
+    "INSERT INTO game_state_snapshots (id, game_id, step_no, state) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+    [nanoidId(), gameId, stepNo, JSON.stringify(snapshotState)]
+  );
 
   await client.query(
     "UPDATE games SET step_no = $2, score_a = $3, score_b = $4, finished = $5, finished_at = CASE WHEN $5 THEN COALESCE(finished_at, NOW()) ELSE finished_at END, winner_team = CASE WHEN $5 THEN $6 ELSE winner_team END, snitch_pos = $7, snitch_revealed = $8, snitch_caught_by_id = $9, snitch_caught_step_no = $10, bludger1_pos = $11, bludger2_pos = $12, quaffle_holder_id = $13, quaffle_pos = $14, quaffle_lock_holder_id = $15, quaffle_lock_step_no = $16 WHERE id = $1",
@@ -2079,6 +2147,7 @@ app.post("/api/judge/games", async (req, res) => {
   }
 
   const nickname = safeNickname(req.body?.nickname);
+  if (!nickname) return res.status(400).json({ error: "nickname_required" });
   const gameId = nanoidId();
   const judgeId = nanoidId();
   const snitchPos = randomChoice(SNITCH_SPAWNS) || "A1";
@@ -2094,7 +2163,7 @@ app.post("/api/judge/games", async (req, res) => {
       );
       await client.query(
         "INSERT INTO participants (id, game_id, nickname, team, role, pos, is_bot, bot_difficulty, is_observer, is_judge) VALUES ($1, $2, $3, $4, NULL, NULL, FALSE, NULL, TRUE, TRUE)",
-        [judgeId, gameId, nickname || "Судья", teamA]
+        [judgeId, gameId, nickname, teamA]
       );
       await client.query("COMMIT");
       return res.status(201).json({ code, gameId, participantId: judgeId, teamA, teamB });
@@ -2674,7 +2743,7 @@ app.get("/api/games/:code/state", async (req, res) => {
   const viewerId = String(req.query?.viewerId || "").trim();
 
   const gameRes = await pool.query(
-    "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, snitch_pos, snitch_revealed, snitch_caught_by_id, quaffle_pos, quaffle_holder_id, bludger1_pos, bludger2_pos, step_no, created_at FROM games WHERE code = $1",
+    "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, snitch_pos, snitch_revealed, snitch_caught_by_id, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, created_at FROM games WHERE code = $1",
     [code]
   );
   const game = gameRes.rows[0];
@@ -2695,10 +2764,10 @@ app.get("/api/games/:code/state", async (req, res) => {
     } catch {}
   }
 
-  const botsRan = startedEffective0 && !Boolean(game.finished) ? await maybeRunBots(game.id) : { changed: false };
+  const botsRan = startedEffective0 && !Boolean(game.finished) && !Boolean(game.paused) ? await maybeRunBots(game.id) : { changed: false };
   if (botsRan.changed) {
     const gameRes2 = await pool.query(
-      "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, snitch_pos, snitch_revealed, snitch_caught_by_id, quaffle_pos, quaffle_holder_id, bludger1_pos, bludger2_pos, step_no, created_at FROM games WHERE code = $1",
+      "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, snitch_pos, snitch_revealed, snitch_caught_by_id, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, created_at FROM games WHERE code = $1",
       [code]
     );
     const nextGame = gameRes2.rows[0];
@@ -2713,6 +2782,7 @@ app.get("/api/games/:code/state", async (req, res) => {
     game.winner_team = nextGame.winner_team;
     game.score_a = nextGame.score_a;
     game.score_b = nextGame.score_b;
+    game.paused = nextGame.paused;
     game.snitch_pos = nextGame.snitch_pos;
     game.snitch_revealed = nextGame.snitch_revealed;
     game.snitch_caught_by_id = nextGame.snitch_caught_by_id;
@@ -2823,6 +2893,7 @@ app.get("/api/games/:code/state", async (req, res) => {
       winnerTeam: game.winner_team || null,
       scoreA: Number(game.score_a || 0),
       scoreB: Number(game.score_b || 0),
+      paused: Boolean(game.paused),
       stepNo: stepNo,
       createdAt: game.created_at
     },
@@ -2885,6 +2956,41 @@ app.get("/api/games/:code/state", async (req, res) => {
           defenderNickname: byId.get(duel.defender_id)?.nickname || null
         }
       : null
+  });
+});
+
+app.get("/api/games/:code/logs", async (req, res) => {
+  const code = String(req.params.code || "").trim().toUpperCase();
+  if (!code) return res.status(400).json({ error: "invalid_code" });
+
+  const gameRes = await pool.query("SELECT id FROM games WHERE code = $1", [code]);
+  const game = gameRes.rows[0];
+  if (!game) return res.status(404).json({ error: "not_found" });
+
+  const snapshotsRes = await pool.query("SELECT step_no, state FROM game_state_snapshots WHERE game_id = $1 ORDER BY step_no ASC", [game.id]);
+  const eventsRes = await pool.query("SELECT id, kind, actor_id, step_no, bludger_idx, target_pos, created_at FROM game_events WHERE game_id = $1 ORDER BY created_at ASC", [game.id]);
+  const participantsRes = await pool.query("SELECT id, nickname, team, role FROM participants WHERE game_id = $1", [game.id]);
+
+  const participantsById = new Map();
+  for (const p of participantsRes.rows) {
+    participantsById.set(p.id, { nickname: p.nickname, team: p.team, role: p.role });
+  }
+
+  res.json({
+    snapshots: snapshotsRes.rows.map(row => ({
+      stepNo: row.step_no,
+      state: row.state
+    })),
+    events: eventsRes.rows.map(row => ({
+      id: row.id,
+      kind: row.kind,
+      actorId: row.actor_id,
+      stepNo: row.step_no,
+      bludgerIdx: row.bludger_idx,
+      targetPos: row.target_pos,
+      createdAt: row.created_at
+    })),
+    participantsById: Object.fromEntries(participantsById)
   });
 });
 
@@ -2988,7 +3094,7 @@ app.post("/api/participants/:id/plan/move", async (req, res) => {
     const pRes = await client.query(
       `
         SELECT p.id, p.game_id, p.team, p.role, p.pos, p.is_observer,
-               g.step_no, g.team_a, g.team_b, g.started, g.finished
+               g.step_no, g.team_a, g.team_b, g.started, g.finished, g.paused
         FROM participants p
         JOIN games g ON g.id = p.game_id
         WHERE p.id = $1
@@ -3012,6 +3118,10 @@ app.post("/api/participants/:id/plan/move", async (req, res) => {
     if (Boolean(p.finished)) {
       await client.query("ROLLBACK");
       return res.status(403).json({ error: "game_finished" });
+    }
+    if (Boolean(p.paused)) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "game_paused" });
     }
 
     const startedEffective = await ensureGameStartedEffective(client, p.game_id, Boolean(p.started));
@@ -3097,6 +3207,7 @@ app.post("/api/games/:code/participants", async (req, res) => {
 
   const mode = req.body?.mode === "observer" ? "observer" : "player";
   const nickname = safeNickname(req.body?.nickname);
+  if (!nickname) return res.status(400).json({ error: "nickname_required" });
   const team = normalizeTeam(req.body?.team);
   if (!team) return res.status(400).json({ error: "invalid_team" });
 
@@ -3211,7 +3322,7 @@ app.post("/api/participants/:id/turn/end", async (req, res) => {
     const pRes = await client.query(
       `
         SELECT p.id, p.game_id, p.team, p.role, p.pos, p.is_observer,
-               g.step_no, g.team_a, g.team_b, g.started, g.finished,
+               g.step_no, g.team_a, g.team_b, g.started, g.finished, g.paused,
                g.quaffle_pos, g.quaffle_holder_id,
                g.quaffle_lock_holder_id, g.quaffle_lock_step_no, g.quaffle_steal_cooldown_step_no,
                g.bludger1_pos, g.bludger2_pos
@@ -3238,6 +3349,10 @@ app.post("/api/participants/:id/turn/end", async (req, res) => {
     if (Boolean(p.finished)) {
       await client.query("ROLLBACK");
       return res.status(403).json({ error: "game_finished" });
+    }
+    if (Boolean(p.paused)) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "game_paused" });
     }
 
     const startedEffective = await ensureGameStartedEffective(client, p.game_id, Boolean(p.started));
@@ -4448,6 +4563,54 @@ app.delete("/api/participants/:id", async (req, res) => {
   }
 });
 
+app.post("/api/judge/:judgeId/pause", async (req, res) => {
+  const judgeId = String(req.params.judgeId || "").trim();
+  if (!judgeId) return res.status(400).json({ error: "invalid_judge" });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const judgeRes = await client.query(
+      `
+        SELECT p.id, p.game_id, p.is_judge,
+               g.finished, g.paused
+        FROM participants p
+        JOIN games g ON g.id = p.game_id
+        WHERE p.id = $1
+        FOR UPDATE
+      `,
+      [judgeId]
+    );
+    const judge = judgeRes.rows[0] || null;
+    if (!judge) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "not_found" });
+    }
+    if (!judge.is_judge) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "not_judge" });
+    }
+    if (Boolean(judge.finished)) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "game_finished" });
+    }
+
+    const newPaused = !Boolean(judge.paused);
+    await client.query(
+      "UPDATE games SET paused = $1 WHERE id = $2",
+      [newPaused, judge.game_id]
+    );
+
+    await client.query("COMMIT");
+    res.json({ ok: true, paused: newPaused });
+  } catch {
+    await client.query("ROLLBACK");
+    res.status(500).json({ error: "db_error" });
+  } finally {
+    client.release();
+  }
+});
+
 app.post("/api/judge/:judgeId/kick", async (req, res) => {
   const judgeId = String(req.params.judgeId || "").trim();
   if (!judgeId) return res.status(400).json({ error: "invalid_judge" });
@@ -4758,6 +4921,22 @@ app.delete("/api/admin/rooms/by-id/:id", async (req, res) => {
   }
 });
 
+app.delete("/api/admin/rooms/batch", async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  if (!ids.every(id => /^[0-9a-zA-Z]{10,30}$/.test(String(id || "")))) {
+    return res.status(400).json({ error: "invalid_ids" });
+  }
+  if (ids.length === 0) {
+    return res.status(400).json({ error: "no_ids" });
+  }
+  try {
+    const delRes = await pool.query("DELETE FROM games WHERE id = ANY($1)", [ids]);
+    res.json({ ok: true, deleted: delRes.rowCount || 0 });
+  } catch {
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
 app.delete("/api/admin/rooms/:code", async (req, res) => {
   const code = String(req.params.code || "").trim().toUpperCase();
   if (!/^[A-Z0-9]{4,10}$/.test(code)) return res.status(400).json({ error: "invalid_code" });
@@ -4798,6 +4977,7 @@ app.get("/admin/rooms/", (_req, res) => {
       .adminErr { color: var(--danger); }
       .adminOk { color: var(--accent); }
       .adminSearch { min-width: 240px; }
+      .selectAll { display:flex; align-items:center; gap:8px; }
       @media (max-width: 720px) {
         .adminHead { flex-direction: column; align-items: stretch; }
         .adminTools { justify-content: space-between; }
@@ -4811,6 +4991,7 @@ app.get("/admin/rooms/", (_req, res) => {
         <div class="adminTools">
           <input id="q" class="adminSearch" placeholder="поиск по коду" autocomplete="off" />
           <button id="refreshBtn" type="button">Обновить</button>
+          <button id="deleteSelectedBtn" type="button" class="danger hidden">Удалить выбранные</button>
           <span id="status" class="adminMuted"></span>
         </div>
       </div>
@@ -4818,6 +4999,9 @@ app.get("/admin/rooms/", (_req, res) => {
       <table class="adminTable">
         <thead>
           <tr>
+            <th style="width:40px;">
+              <input type="checkbox" id="selectAll" />
+            </th>
             <th>Код</th>
             <th>ID</th>
             <th>Матч</th>
@@ -4829,7 +5013,7 @@ app.get("/admin/rooms/", (_req, res) => {
           </tr>
         </thead>
         <tbody id="rows">
-          <tr><td class="adminEmpty" colspan="8">Загрузка…</td></tr>
+          <tr><td class="adminEmpty" colspan="9">Загрузка…</td></tr>
         </tbody>
       </table>
     </div>
@@ -4840,10 +5024,12 @@ app.get("/admin/rooms/", (_req, res) => {
         q: document.getElementById("q"),
         rows: document.getElementById("rows"),
         refreshBtn: document.getElementById("refreshBtn"),
+        deleteSelectedBtn: document.getElementById("deleteSelectedBtn"),
+        selectAll: document.getElementById("selectAll"),
         status: document.getElementById("status"),
       };
 
-      const state = { rooms: [] };
+      const state = { rooms: [], selectedIds: new Set() };
 
       function esc(s) {
         return String(s || "")
@@ -4896,10 +5082,43 @@ app.get("/admin/rooms/", (_req, res) => {
         return state.rooms.filter((r) => String(r.code || "").toUpperCase().includes(q));
       }
 
+      function updateDeleteSelectedBtn() {
+        const filtered = filteredRooms();
+        const selectedInFiltered = filtered.filter(r => state.selectedIds.has(String(r.id || ""))).length;
+        if (selectedInFiltered > 0) {
+          els.deleteSelectedBtn.classList.remove("hidden");
+          els.deleteSelectedBtn.textContent = \`Удалить выбранные (\${selectedInFiltered})\`;
+        } else {
+          els.deleteSelectedBtn.classList.add("hidden");
+        }
+      }
+
+      function updateSelectAllCheckbox() {
+        const filtered = filteredRooms();
+        if (filtered.length === 0) {
+          els.selectAll.checked = false;
+          els.selectAll.indeterminate = false;
+          return;
+        }
+        const selectedInFiltered = filtered.filter(r => state.selectedIds.has(String(r.id || ""))).length;
+        if (selectedInFiltered === 0) {
+          els.selectAll.checked = false;
+          els.selectAll.indeterminate = false;
+        } else if (selectedInFiltered === filtered.length) {
+          els.selectAll.checked = true;
+          els.selectAll.indeterminate = false;
+        } else {
+          els.selectAll.checked = false;
+          els.selectAll.indeterminate = true;
+        }
+      }
+
       function render() {
         const rooms = filteredRooms();
         if (rooms.length === 0) {
-          els.rows.innerHTML = '<tr><td class="adminEmpty" colspan="8">Нет комнат</td></tr>';
+          els.rows.innerHTML = '<tr><td class="adminEmpty" colspan="9">Нет комнат</td></tr>';
+          updateDeleteSelectedBtn();
+          updateSelectAllCheckbox();
           return;
         }
 
@@ -4915,8 +5134,12 @@ app.get("/admin/rooms/", (_req, res) => {
           const observers = Number(r.observers || 0);
           const created = formatDate(r.created_at);
           const roomUrl = \`/#room=\${encodeURIComponent(code)}\`;
+          const isChecked = state.selectedIds.has(id);
           return \`
-            <tr>
+            <tr data-id="\${esc(id)}">
+              <td>
+                <input type="checkbox" class="roomCheck" data-id="\${esc(id)}" \${isChecked ? "checked" : ""} />
+              </td>
               <td><span class="adminCode">\${esc(code)}</span></td>
               <td class="adminMuted">\${esc(id)}</td>
               <td><a class="adminLink" href="\${roomUrl}" target="_blank" rel="noreferrer">\${match}</a></td>
@@ -4934,6 +5157,8 @@ app.get("/admin/rooms/", (_req, res) => {
             </tr>
           \`;
         }).join("");
+        updateDeleteSelectedBtn();
+        updateSelectAllCheckbox();
       }
 
       async function loadRooms() {
@@ -4950,7 +5175,7 @@ app.get("/admin/rooms/", (_req, res) => {
         } catch {
           els.status.textContent = "ошибка загрузки";
           els.status.className = "adminErr";
-          els.rows.innerHTML = '<tr><td class="adminEmpty adminErr" colspan="7">Не удалось загрузить комнаты</td></tr>';
+          els.rows.innerHTML = '<tr><td class="adminEmpty adminErr" colspan="9">Не удалось загрузить комнаты</td></tr>';
         }
       }
 
@@ -4967,9 +5192,57 @@ app.get("/admin/rooms/", (_req, res) => {
         }
       }
 
+      async function deleteSelectedRooms() {
+        const filtered = filteredRooms();
+        const selectedIds = filtered.filter(r => state.selectedIds.has(String(r.id || ""))).map(r => String(r.id || ""));
+        if (selectedIds.length === 0) return;
+        const ok = confirm(\`Удалить \${selectedIds.length} комнат?\`);
+        if (!ok) return;
+        try {
+          const res = await fetch("/api/admin/rooms/batch", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: selectedIds })
+          });
+          const body = await res.json().catch(() => null);
+          if (!res.ok) throw new Error(body && body.error ? body.error : "delete_failed");
+          state.selectedIds.clear();
+          await loadRooms();
+        } catch {
+          alert("Не удалось удалить выбранные комнаты");
+        }
+      }
+
       els.refreshBtn.addEventListener("click", loadRooms);
+      els.deleteSelectedBtn.addEventListener("click", deleteSelectedRooms);
       els.q.addEventListener("input", render);
+      els.selectAll.addEventListener("change", () => {
+        const filtered = filteredRooms();
+        const isChecked = els.selectAll.checked;
+        filtered.forEach(r => {
+          const id = String(r.id || "");
+          if (isChecked) {
+            state.selectedIds.add(id);
+          } else {
+            state.selectedIds.delete(id);
+          }
+        });
+        render();
+      });
       els.rows.addEventListener("click", async (e) => {
+        const check = e.target && e.target.closest ? e.target.closest("input.roomCheck") : null;
+        if (check) {
+          const id = check.dataset.id;
+          if (id) {
+            if (state.selectedIds.has(id)) {
+              state.selectedIds.delete(id);
+            } else {
+              state.selectedIds.add(id);
+            }
+            render();
+          }
+          return;
+        }
         const btn = e.target && e.target.closest ? e.target.closest("button[data-act]") : null;
         if (!btn) return;
         const act = btn.dataset.act;
@@ -5047,7 +5320,7 @@ app.get(["/judge-room-creation", "/judge-room-creation/"], (_req, res) => {
 
         <label>
           Имя судьи
-          <input id="nickname" placeholder="например, Минерва" autocomplete="off" />
+          <input id="nickname" placeholder="например, Минерва" autocomplete="off" maxlength="24" required />
         </label>
 
         <div class="judgeRow2">
@@ -5130,6 +5403,10 @@ app.get(["/judge-room-creation", "/judge-room-creation/"], (_req, res) => {
 
         if (!teamA || !teamB || teamA === teamB) {
           setStatus("Выбери две разные команды");
+          return;
+        }
+        if (!nickname) {
+          setStatus("Введи имя судьи");
           return;
         }
 

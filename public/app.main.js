@@ -158,7 +158,7 @@ async function setupHome() {
     const teamB = els.createTeamB.value;
     const yourTeam = els.createYourTeam.value;
     const role = els.createRole.value;
-    const nickname = els.createNick.value;
+    const nickname = String(els.createNick.value || "").trim();
     const fillBots = els.createFillBots.value === "yes";
     const botDifficulty = Number(els.createBotDifficulty.value || 2);
 
@@ -168,6 +168,10 @@ async function setupHome() {
     }
     if (!yourTeam) {
       showToast("Выбери свою команду");
+      return;
+    }
+    if (!nickname) {
+      showToast("Введи имя");
       return;
     }
 
@@ -223,9 +227,10 @@ async function setupHome() {
     const code = String(els.joinCode.value || "").trim().toUpperCase();
     const team = els.joinTeam.value;
     const role = els.joinRole.value;
-    const nickname = els.joinNick.value;
+    const nickname = String(els.joinNick.value || "").trim();
     if (!code) return showToast("Введи код комнаты");
     if (!team) return showToast("Выбери команду");
+    if (!nickname) return showToast("Введи имя");
 
     const joinRes = await api.join(code, { mode: "player", nickname, team, role });
     if (!joinRes.ok) {
@@ -240,8 +245,9 @@ async function setupHome() {
 
   els.watchBtn.addEventListener("click", async () => {
     const code = String(els.watchCode.value || "").trim().toUpperCase();
-    const nickname = els.watchNick.value;
+    const nickname = String(els.watchNick.value || "").trim();
     if (!code) return showToast("Введи код комнаты");
+    if (!nickname) return showToast("Введи имя");
 
     const res = await api.state(code);
     if (!res.ok) {
@@ -403,6 +409,21 @@ async function bootstrap() {
         return;
       }
       showToast("Игра началась");
+      await refreshRoomOnce();
+    });
+
+    els.pauseBtn.addEventListener("click", async () => {
+      const id = state.session?.participantId || null;
+      if (!id) return;
+      const res = await api.judgePause(id);
+      if (!res.ok) {
+        if (res.status === 403 && res.body?.error === "not_judge") showToast("Только судья может управлять паузой");
+        else if (res.status === 403 && res.body?.error === "game_finished") showToast("Игра уже завершена");
+        else showToast("Не удалось изменить статус паузы");
+        await refreshRoomOnce();
+        return;
+      }
+      showToast(res.body?.paused ? "Игра на паузе" : "Игра продолжается");
       await refreshRoomOnce();
     });
 
@@ -569,6 +590,213 @@ async function bootstrap() {
       if (!code) return;
       const ok = await copyToClipboard(code);
       showToast(ok ? "Код комнаты скопирован" : "Не удалось скопировать");
+    });
+
+    els.exportLogsBtn.addEventListener("click", async () => {
+      const code = String(state.roomCode || "").trim().toUpperCase();
+      if (!code) return;
+
+      showToast("Загрузка логов...");
+
+      try {
+        console.log("Export logs: fetching data for game", code);
+        const res = await fetch(`/api/games/${code}/logs`);
+        if (!res.ok) throw new Error(`Failed to fetch logs: ${res.status}`);
+        const logsData = await res.json();
+        console.log("Export logs: got data", logsData);
+
+        const { snapshots, events, participantsById } = logsData;
+        const exportMessages = globalThis.QUIDDITCH_MESSAGES && typeof globalThis.QUIDDITCH_MESSAGES === "object" ? globalThis.QUIDDITCH_MESSAGES : {};
+
+        function pickRandom(arr, fallback) {
+          if (!Array.isArray(arr) || arr.length === 0) return fallback;
+          const idx = Math.floor(Math.random() * arr.length);
+          return arr[idx] ?? fallback;
+        }
+
+        function replaceAllPlain(s, needle, replacement) {
+          return String(s || "").split(String(needle || "")).join(String(replacement || ""));
+        }
+
+        function nickFor(p) {
+          return String(p?.nickname || "Игрок");
+        }
+
+        function freeQuafflePickupExportMessage(p) {
+          const tpl = pickRandom(exportMessages.FREE_QUAFFLE_PICKUP_MESSAGES, "[Имя игрока] подбирает квоффл!");
+          const team = teamLabel(p?.team);
+          return replaceAllPlain(replaceAllPlain(tpl, "[Имя игрока]", nickFor(p)), "[Название команды игрока]", team);
+        }
+
+        function quafflePassExportMessage(passer, receiver) {
+          const tpl = pickRandom(exportMessages.QUAFFLE_PASS_MESSAGES, "[Имя игрока делающего пас] отдаёт пас!");
+          let out = tpl;
+          out = replaceAllPlain(out, "[Имя игрока делающего пас]", nickFor(passer));
+          out = replaceAllPlain(out, "[Имя игрока принимающего пас]", nickFor(receiver));
+          out = replaceAllPlain(out, "[Имя игркока принимающего пас]", nickFor(receiver));
+          return out;
+        }
+
+        function quaffleStealExportMessage(taker) {
+          const tpl = pickRandom(exportMessages.QUAFFLE_STEAL_MESSAGES, "[Имя игрока] выхватывает квоффл!");
+          let out = tpl;
+          out = replaceAllPlain(out, "[Имя игрока]", nickFor(taker));
+          out = replaceAllPlain(out, "[Имя игррка]", nickFor(taker));
+          return out;
+        }
+
+        function snitchRevealExportMessage() {
+          return String(pickRandom(exportMessages.SNITCH_REVEAL_MESSAGES, "Снитч обнаружен!") || "").trim() || "Снитч обнаружен!";
+        }
+
+        function snitchHideExportMessage() {
+          return String(pickRandom(exportMessages.SNITCH_HIDE_MESSAGES, "Снитч снова скрылся!") || "").trim() || "Снитч снова скрылся!";
+        }
+
+        function goalExportMessage(keeper) {
+          const tpl = pickRandom(exportMessages.GOAL_SCORED_MESSAGES, "Гол! [Имя игрока] не успевает!");
+          return replaceAllPlain(tpl, "[Имя игрока]", nickFor(keeper));
+        }
+
+        let htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Квиддич логи — ${code}</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; }
+    h1, h2 { color: #333; }
+    .board-img { max-width: 700px; margin: 10px 0; }
+    .events { margin: 20px 0; }
+    .messages { margin: 14px 0; }
+    .event-item { margin: 5px 0; padding-left: 20px; }
+  </style>
+</head>
+<body>
+  <h1>Логи игры Квиддич — ${code}</h1>
+`;
+
+        for (let i = 0; i < snapshots.length; i += 1) {
+          const snapshot = snapshots[i];
+          const stepNo = snapshot.stepNo;
+          const stepEvents = events.filter(e => e.stepNo === stepNo);
+          
+          htmlContent += `<h2>Ход ${stepNo}</h2>`;
+
+          const canvas = renderBoardSnapshotToCanvas(snapshot.state);
+          const dataUrl = canvas.toDataURL("image/png");
+          htmlContent += `<img src="${dataUrl}" class="board-img" alt="Состояние поля на ходу ${stepNo}">`;
+
+          const prevState = snapshots[i - 1]?.state || null;
+          const nextState = snapshot.state || null;
+          const stepMessages = [];
+          if (prevState && nextState) {
+            if (!prevState.snitchRevealed && nextState.snitchRevealed) stepMessages.push(snitchRevealExportMessage());
+            if (prevState.snitchRevealed && !nextState.snitchRevealed && !nextState.snitchCaughtById) stepMessages.push(snitchHideExportMessage());
+
+            const prevHolder = prevState.quaffleHolderId || null;
+            const nextHolder = nextState.quaffleHolderId || null;
+            const prevParticipants = Array.isArray(prevState.participants) ? prevState.participants : [];
+            const nextParticipants = Array.isArray(nextState.participants) ? nextState.participants : [];
+            const prevP = prevHolder ? (nextParticipants.find((p) => p.id === prevHolder) || prevParticipants.find((p) => p.id === prevHolder) || null) : null;
+            const nextP = nextHolder ? (nextParticipants.find((p) => p.id === nextHolder) || prevParticipants.find((p) => p.id === nextHolder) || null) : null;
+
+            if (!prevHolder && nextHolder && nextP) {
+              stepMessages.push(freeQuafflePickupExportMessage(nextP));
+            }
+            if (prevHolder && nextHolder && prevHolder !== nextHolder && prevP && nextP) {
+              const sameTeam = prevP.team && nextP.team && prevP.team === nextP.team;
+              const pass = sameTeam && isChaserRole(prevP.role) && isChaserRole(nextP.role);
+              const steal = !sameTeam && isChaserRole(nextP.role);
+              if (pass) stepMessages.push(quafflePassExportMessage(prevP, nextP));
+              else if (steal) stepMessages.push(quaffleStealExportMessage(nextP));
+            }
+          }
+
+          for (const evt of stepEvents) {
+            if (!evt) continue;
+            if (evt.kind === "goal") {
+              const keeper = participantsById?.[evt.actorId] || null;
+              if (keeper) stepMessages.push(goalExportMessage(keeper));
+            }
+          }
+
+          if (stepMessages.length > 0) {
+            htmlContent += `<div class="messages"><strong>Сообщения:</strong><ul>`;
+            for (const msg of stepMessages) {
+              htmlContent += `<li class="event-item">${String(msg || "")}</li>`;
+            }
+            htmlContent += `</ul></div>`;
+          }
+
+          if (stepEvents.length > 0) {
+            htmlContent += `<div class="events"><strong>События:</strong><ul>`;
+
+            for (const evt of stepEvents) {
+              let text = "";
+              const actor = participantsById[evt.actorId];
+              const roleText = actor ? roleShort(actor.role) : "";
+              const nick = actor?.nickname || "Игрок";
+
+              switch (evt.kind) {
+                case "hit_bludger":
+                  text = `${nick} (${roleText}) ударил бладжер ${evt.bludgerIdx || ""} в ${evt.targetPos || ""}`;
+                  break;
+                case "stun_bludger":
+                  text = `${nick} (${roleText}) оглушился бладжером в ${evt.targetPos || ""}`;
+                  break;
+                case "pickup":
+                  text = `${nick} (${roleText}) взял квоффл`;
+                  break;
+                case "steal":
+                  text = `${nick} (${roleText}) выхватил квоффл`;
+                  break;
+                case "pass":
+                  text = `${nick} (${roleText}) дал пас`;
+                  break;
+                case "throw":
+                  text = `${nick} (${roleText}) бросил квоффл в ворота`;
+                  break;
+                case "goal":
+                  text = `Гол! ${nick} (${roleText}) пропустил гол`;
+                  break;
+                case "save":
+                  text = `${nick} (${roleText}) поймал мяч (сохранил)`;
+                  break;
+                case "keeper_throw":
+                  text = `${nick} (${roleText}) (вратарь) кинул мяч`;
+                  break;
+                case "keeper_pickup":
+                  text = `${nick} (${roleText}) (вратарь) поднял квоффл`;
+                  break;
+                default:
+                  text = `${evt.kind}: ${nick} (${roleText})`;
+              }
+
+              htmlContent += `<li class="event-item">${text}</li>`;
+            }
+            htmlContent += `</ul></div>`;
+          }
+        }
+
+        htmlContent += `</body></html>`;
+
+        const blob = new Blob([htmlContent], { type: "text/html;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `Квиддич_${code}_логи.html`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        showToast("Логи экспортированы! Откройте в Word и сохраните как DOCX.");
+      } catch (err) {
+        console.error("Export logs error:", err);
+        showToast("Ошибка экспорта логов");
+      }
     });
 
     els.participantsOpenBtn.addEventListener("click", () => {
