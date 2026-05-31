@@ -36,7 +36,7 @@ body {
 body.inRoom {
   background:
     linear-gradient(rgba(12, 19, 16, 0.72), rgba(12, 19, 16, 0.72)),
-    url("/src/spectating.png") center / contain no-repeat fixed;
+    url("/src/spectating.png") center / cover no-repeat fixed;
 }
 
 a {
