@@ -1235,15 +1235,6 @@ function renderPieces(gameState) {
 
   const myTs = myId && gameState.turnStates ? gameState.turnStates[myId] : null;
   const myPlanCoord = normalizeCoord(state.draft?.to) || normalizeCoord(myTs?.plannedTo);
-  const reservedAll = reservedMovesSet(gameState);
-  if (myPlanCoord) reservedAll.delete(myPlanCoord);
-  for (const coord of reservedAll) {
-    const cell = els.board.querySelector(`[data-coord='${coord}']`);
-    if (cell) {
-      cell.classList.add("blocked");
-      cell.classList.add("planned");
-    }
-  }
   if (myPlanCoord) {
     const cell = els.board.querySelector(`[data-coord='${myPlanCoord}']`);
     if (cell) cell.classList.add("planned");
