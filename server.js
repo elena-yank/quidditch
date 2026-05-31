@@ -2494,7 +2494,8 @@ async function resolveDuelIfReady(client, duelRow) {
         duelRow.game_id
       ]);
     }
-  } else {
+  } else if (kind === "hit_bludger") {
+  } else if (kind === "steal") {
     const upd = await client.query(
       `
         UPDATE games
@@ -2513,6 +2514,7 @@ async function resolveDuelIfReady(client, duelRow) {
         duelRow.game_id
       ]);
     }
+  } else {
   }
 
   await client.query(
