@@ -3,7 +3,7 @@ async function refreshRoomOnce() {
   const res = await api.state(state.roomCode, state.session?.participantId || null);
   if (!res.ok) {
     if (res.status === 403 && res.body?.error === "kicked") {
-      showToast("Тебя кикнул судья");
+      showToast("Тебя заменили в роли");
       clearSession();
       await goHome();
       return;
@@ -27,6 +27,7 @@ async function refreshRoomOnce() {
   captureGameEvents(prev, next);
   state.gameState = next;
   renderRoom(next);
+  syncVoiceFromGameState(next).catch(() => {});
 }
 
 function startRoomPolling() {
@@ -37,6 +38,346 @@ function startRoomPolling() {
 function stopRoomPolling() {
   if (state.interval) clearInterval(state.interval);
   state.interval = null;
+}
+
+const VOICE_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+let voiceControlsHomeParent = null;
+let voiceControlsHomeNextSibling = null;
+
+const VOICE_SVG = {
+  mic: `
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 14a3 3 0 0 0 3-3V4a3 3 0 0 0-6 0v7a3 3 0 0 0 3 3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"></path>
+      <path d="M19 11v1a7 7 0 0 1-14 0v-1" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M12 19v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+    </svg>
+  `,
+  micOff: `
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M9 9v3a3 3 0 0 0 5.12 2.12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+      <path d="M15 9V4a3 3 0 0 0-5.71-1.28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+      <path d="M19 11v1a7 7 0 0 1-11.56 5.22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+      <path d="M5 11v1a7 7 0 0 0 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+      <path d="M12 19v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+    </svg>
+  `,
+  volume: `
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M11 5L6 9H3v6h3l5 4V5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"></path>
+      <path d="M15.54 8.46a5 5 0 0 1 0 7.07" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M19.07 4.93a10 10 0 0 1 0 14.14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+    </svg>
+  `,
+  volumeOff: `
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M11 5L6 9H3v6h3l5 4V5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"></path>
+      <path d="M15 9.5a4 4 0 0 1 0 5.66" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+    </svg>
+  `,
+  voiceOff: `
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M9 9v3a3 3 0 0 0 5.12 2.12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+      <path d="M15 9V4a3 3 0 0 0-5.71-1.28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+      <path d="M19 11v1a7 7 0 0 1-11.56 5.22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+      <path d="M5 11v1a7 7 0 0 0 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+  `
+};
+
+function canUseVoiceInBrowser() {
+  return typeof RTCPeerConnection === "function";
+}
+
+function syncVoiceControlsPlacement() {
+  if (!els.voiceControls) return;
+  if (!voiceControlsHomeParent) {
+    voiceControlsHomeParent = els.voiceControls.parentElement;
+    voiceControlsHomeNextSibling = els.voiceControls.nextSibling;
+  }
+  if (!voiceControlsHomeParent) return;
+
+  const isInRoom = document.body.classList.contains("inRoom");
+  const isMobile = window.matchMedia && window.matchMedia("(max-width: 900px)").matches;
+  const statusRow = els.sideTopArea?.querySelector?.(".sideStatusRow") || null;
+
+  if (isInRoom && isMobile && statusRow) {
+    if (els.voiceControls.parentElement !== statusRow) statusRow.appendChild(els.voiceControls);
+    return;
+  }
+
+  if (els.voiceControls.parentElement === voiceControlsHomeParent) return;
+  if (voiceControlsHomeNextSibling && voiceControlsHomeNextSibling.parentElement === voiceControlsHomeParent) {
+    voiceControlsHomeParent.insertBefore(els.voiceControls, voiceControlsHomeNextSibling);
+  } else {
+    voiceControlsHomeParent.appendChild(els.voiceControls);
+  }
+}
+
+function voiceSetSpeakerMuted(nextMuted) {
+  const next = Boolean(nextMuted);
+  state.voice.speakerMuted = next;
+  for (const peer of state.voice.peers.values()) {
+    if (peer?.audioEl) peer.audioEl.muted = next;
+  }
+}
+
+async function voiceEnsureLocalStream() {
+  if (state.voice.localStream) return state.voice.localStream;
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error("getUserMedia_unavailable");
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  state.voice.localStream = stream;
+  return stream;
+}
+
+async function voiceAttachLocalTrackToPeer(peer) {
+  if (!peer?.pc || peer.pc.connectionState === "closed") return;
+  if (!peer.audioTransceiver) return;
+  if (state.voice.micMuted) {
+    try {
+      await peer.audioTransceiver.sender.replaceTrack(null);
+    } catch {}
+    return;
+  }
+  const stream = await voiceEnsureLocalStream();
+  const track = stream.getAudioTracks?.()[0] || null;
+  if (!track) return;
+  try {
+    await peer.audioTransceiver.sender.replaceTrack(track);
+  } catch {}
+}
+
+function voiceStopLocalStream() {
+  const s = state.voice.localStream;
+  state.voice.localStream = null;
+  if (!s) return;
+  try {
+    for (const t of s.getTracks()) t.stop();
+  } catch {}
+}
+
+async function voiceSetMicMuted(nextMuted) {
+  const next = Boolean(nextMuted);
+  state.voice.micMuted = next;
+  if (next) voiceStopLocalStream();
+  for (const peer of state.voice.peers.values()) {
+    await voiceAttachLocalTrackToPeer(peer);
+  }
+  for (const peer of state.voice.peers.values()) {
+    if (peer?.isInitiator) voiceMaybeOffer(peer).catch(() => {});
+  }
+}
+
+function voiceClosePeer(peerId) {
+  const peer = state.voice.peers.get(peerId);
+  if (!peer) return;
+  state.voice.peers.delete(peerId);
+  try {
+    if (peer.audioEl) peer.audioEl.remove();
+  } catch {}
+  try {
+    peer.pc?.close();
+  } catch {}
+}
+
+function voiceStopAll() {
+  if (state.voice.pollInterval) clearInterval(state.voice.pollInterval);
+  state.voice.pollInterval = null;
+  voiceStopLocalStream();
+  for (const peerId of Array.from(state.voice.peers.keys())) voiceClosePeer(peerId);
+  state.voice.lastSeq = 0;
+}
+
+async function voiceMaybeOffer(peer) {
+  if (!peer?.pc) return;
+  if (!peer.isInitiator) return;
+  const pc = peer.pc;
+  if (peer.makingOffer) return;
+  if (pc.signalingState !== "stable") return;
+  peer.makingOffer = true;
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const out = pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription;
+    await api.voiceSend(state.session.participantId, { toId: peer.peerId, kind: "offer", payload: out });
+  } catch {} finally {
+    peer.makingOffer = false;
+  }
+}
+
+function voiceEnsurePeer(peerId) {
+  if (state.voice.peers.has(peerId)) return state.voice.peers.get(peerId);
+  const myId = state.session?.participantId || null;
+  if (!myId || !peerId || peerId === myId) return null;
+  if (!canUseVoiceInBrowser()) return null;
+
+  const pc = new RTCPeerConnection({ iceServers: VOICE_ICE_SERVERS });
+  const audioTransceiver = pc.addTransceiver("audio", { direction: "sendrecv" });
+  const isInitiator = String(myId) < String(peerId);
+
+  const audioEl = document.createElement("audio");
+  audioEl.autoplay = true;
+  audioEl.playsInline = true;
+  audioEl.muted = Boolean(state.voice.speakerMuted);
+  audioEl.style.display = "none";
+  document.body.appendChild(audioEl);
+
+  const peer = { peerId, pc, audioEl, audioTransceiver, isInitiator, makingOffer: false };
+  state.voice.peers.set(peerId, peer);
+
+  pc.onicecandidate = (e) => {
+    if (!e?.candidate) return;
+    const out = e.candidate?.toJSON ? e.candidate.toJSON() : e.candidate;
+    api.voiceSend(myId, { toId: peerId, kind: "ice", payload: out }).catch(() => {});
+  };
+  pc.ontrack = (e) => {
+    const stream = e.streams?.[0] || null;
+    if (stream) audioEl.srcObject = stream;
+    else audioEl.srcObject = new MediaStream([e.track]);
+    audioEl.muted = Boolean(state.voice.speakerMuted);
+    audioEl.play?.().catch(() => {});
+  };
+  pc.onconnectionstatechange = () => {
+    const st = pc.connectionState;
+    if (st === "failed" || st === "disconnected" || st === "closed") {
+      voiceClosePeer(peerId);
+    }
+  };
+
+  voiceAttachLocalTrackToPeer(peer).catch(() => {});
+  voiceMaybeOffer(peer).catch(() => {});
+
+  return peer;
+}
+
+async function voiceHandleSignal(signal) {
+  const myId = state.session?.participantId || null;
+  if (!myId) return;
+  const fromId = signal?.fromId;
+  const kind = signal?.kind;
+  const payload = signal?.payload;
+  if (!fromId || fromId === myId) return;
+
+  if (kind === "hangup") {
+    voiceClosePeer(fromId);
+    return;
+  }
+
+  const peer = voiceEnsurePeer(fromId);
+  if (!peer) return;
+  const pc = peer.pc;
+
+  if (kind === "offer") {
+    try {
+      await pc.setRemoteDescription(payload);
+      await voiceAttachLocalTrackToPeer(peer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      const out = pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription;
+      await api.voiceSend(myId, { toId: fromId, kind: "answer", payload: out });
+    } catch {}
+    return;
+  }
+
+  if (kind === "answer") {
+    try {
+      await pc.setRemoteDescription(payload);
+    } catch {}
+    return;
+  }
+
+  if (kind === "ice") {
+    try {
+      if (payload) await pc.addIceCandidate(payload);
+    } catch {}
+  }
+}
+
+async function voicePollOnce() {
+  const myId = state.session?.participantId || null;
+  if (!myId) return;
+  const res = await api.voicePoll(myId, state.voice.lastSeq || 0);
+  if (!res.ok) return;
+  const voiceEnabled = Boolean(res.body?.voiceEnabled);
+  if (!voiceEnabled) {
+    voiceStopAll();
+    updateVoiceUi(state.gameState);
+    return;
+  }
+  const signals = Array.isArray(res.body?.signals) ? res.body.signals : [];
+  for (const s of signals) {
+    const seq = Number(s?.seq || 0);
+    if (seq > state.voice.lastSeq) state.voice.lastSeq = seq;
+    await voiceHandleSignal(s);
+  }
+}
+
+function updateVoiceUi(gameState) {
+  syncVoiceControlsPlacement();
+  if (!els.voiceMicBtn || !els.voiceSpeakerBtn || !els.voiceGlobalBtn) return;
+  const canVoice = canUseVoiceInBrowser();
+  const myId = state.session?.participantId || null;
+  const me = myId && gameState ? (gameState.participants || []).find((p) => p.id === myId) : null;
+  const voiceEnabled = Boolean(gameState?.game?.voiceEnabled);
+
+  const disabled = !canVoice || !myId || !voiceEnabled;
+  els.voiceMicBtn.disabled = disabled;
+  els.voiceSpeakerBtn.disabled = !canVoice || !myId;
+
+  const micMuted = Boolean(state.voice.micMuted) || disabled;
+  els.voiceMicBtn.innerHTML = micMuted ? VOICE_SVG.micOff : VOICE_SVG.mic;
+  els.voiceMicBtn.classList.toggle("danger", micMuted);
+  els.voiceMicBtn.setAttribute("aria-pressed", micMuted ? "false" : "true");
+  els.voiceMicBtn.title = micMuted ? (disabled ? "Голос отключён" : "Микрофон выключен") : "Микрофон включён";
+  els.voiceMicBtn.setAttribute("aria-label", els.voiceMicBtn.title);
+
+  const speakerMuted = Boolean(state.voice.speakerMuted);
+  els.voiceSpeakerBtn.innerHTML = speakerMuted ? VOICE_SVG.volumeOff : VOICE_SVG.volume;
+  els.voiceSpeakerBtn.classList.toggle("danger", speakerMuted);
+  els.voiceSpeakerBtn.setAttribute("aria-pressed", speakerMuted ? "false" : "true");
+  els.voiceSpeakerBtn.title = speakerMuted ? "Динамик выключен" : "Динамик включён";
+  els.voiceSpeakerBtn.setAttribute("aria-label", els.voiceSpeakerBtn.title);
+
+  const isJudge = Boolean(me?.is_judge);
+  els.voiceGlobalBtn.classList.toggle("hidden", !isJudge);
+  if (isJudge) {
+    els.voiceGlobalBtn.disabled = false;
+    els.voiceGlobalBtn.innerHTML = VOICE_SVG.voiceOff;
+    els.voiceGlobalBtn.classList.toggle("danger", voiceEnabled);
+    els.voiceGlobalBtn.title = voiceEnabled ? "Отключить голос для всех" : "Включить голос для всех";
+    els.voiceGlobalBtn.setAttribute("aria-label", els.voiceGlobalBtn.title);
+  }
+}
+
+async function syncVoiceFromGameState(gameState) {
+  updateVoiceUi(gameState);
+  const myId = state.session?.participantId || null;
+  if (!myId || !gameState) return;
+  if (!canUseVoiceInBrowser()) return;
+
+  const voiceEnabled = Boolean(gameState?.game?.voiceEnabled);
+  if (!voiceEnabled) {
+    voiceStopAll();
+    updateVoiceUi(gameState);
+    return;
+  }
+
+  if (!state.voice.pollInterval) {
+    state.voice.pollInterval = setInterval(() => voicePollOnce().catch(() => {}), 1000);
+  }
+
+  const canPeer = new Set();
+  for (const p of gameState.participants || []) {
+    if (!p || p.id === myId) continue;
+    if (Boolean(p.is_bot)) continue;
+    canPeer.add(p.id);
+    voiceEnsurePeer(p.id);
+  }
+  for (const peerId of Array.from(state.voice.peers.keys())) {
+    if (!canPeer.has(peerId)) voiceClosePeer(peerId);
+  }
 }
 
 const HOME_TITLE = "Квиддич";
@@ -79,6 +420,30 @@ function initHomeTabs() {
   setHomeTab("create");
 }
 
+async function joinWithRoleTakeoverPrompt(code, payload) {
+  const res = await api.join(code, payload);
+  if (res.ok) return res;
+
+  if (res.status === 409 && res.body?.error === "role_taken") {
+    const takenBy = res.body?.takenBy?.nickname ? String(res.body.takenBy.nickname).trim() : "";
+    const text = takenBy
+      ? `Эта роль уже занята игроком по имени «${takenBy}». Желаешь всё равно войти?`
+      : "Эта роль уже занята. Желаешь всё равно войти?";
+
+    const ok = await openConfirmOverlay({
+      title: "Роль уже занята",
+      text,
+      okText: "Войти",
+      cancelText: "Отмена"
+    });
+    if (!ok) return { ok: false, cancelled: true };
+
+    return api.join(code, { ...payload, force: true });
+  }
+
+  return res;
+}
+
 function resetRoomScopedState() {
   state.gameState = null;
   state.eventLog = [];
@@ -92,6 +457,7 @@ function resetRoomScopedState() {
   state.resultsDismissed = false;
   state.draft = { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null };
   renderEventLog();
+  voiceStopAll();
 }
 
 async function goRoom(code) {
@@ -99,6 +465,7 @@ async function goRoom(code) {
   if (state.roomCode !== nextRoom) resetRoomScopedState();
   state.roomCode = nextRoom;
   setView("room");
+  syncVoiceControlsPlacement();
   syncLeaveGameBtnLabel();
   await refreshRoomOnce();
   startRoomPolling();
@@ -111,10 +478,10 @@ async function goHome() {
   setHomeHeader();
   try {
     history.replaceState(null, "", location.pathname + location.search);
-  } catch {
-    location.hash = "";
-  }
+  } catch {}
+  if (location.hash) location.hash = "";
   setView("home");
+  syncVoiceControlsPlacement();
   setHomeTab("create");
   syncLeaveGameBtnLabel();
 }
@@ -182,9 +549,10 @@ async function setupHome() {
     }
 
     const code = createRes.body.code;
-    const joinRes = await api.join(code, { mode: "player", nickname, team: yourTeam, role });
+    const joinRes = await joinWithRoleTakeoverPrompt(code, { mode: "player", nickname, team: yourTeam, role });
     if (!joinRes.ok) {
-      if (joinRes.status === 409) showToast("Роль уже занята");
+      if (joinRes.cancelled) return;
+      if (joinRes.status === 409 && joinRes.body?.error === "role_taken") showToast("Роль уже занята");
       else showToast("Не удалось войти");
       return;
     }
@@ -232,9 +600,10 @@ async function setupHome() {
     if (!team) return showToast("Выбери команду");
     if (!nickname) return showToast("Введи имя");
 
-    const joinRes = await api.join(code, { mode: "player", nickname, team, role });
+    const joinRes = await joinWithRoleTakeoverPrompt(code, { mode: "player", nickname, team, role });
     if (!joinRes.ok) {
-      if (joinRes.status === 409) showToast("Роль уже занята");
+      if (joinRes.cancelled) return;
+      if (joinRes.status === 409 && joinRes.body?.error === "role_taken") showToast("Роль уже занята");
       else if (joinRes.body?.error === "team_not_in_game") showToast("Эта команда не участвует в матче");
       else showToast("Не удалось войти");
       return;
@@ -343,12 +712,20 @@ async function bootstrap() {
     await setupHome();
     await ensureBoardPitchLayoutLoaded();
     syncLeaveGameBtnLabel();
+    syncVoiceControlsPlacement();
     if (window.matchMedia) {
       const mq = window.matchMedia("(max-width: 900px) and (orientation: portrait)");
       if (mq && typeof mq.addEventListener === "function") mq.addEventListener("change", syncLeaveGameBtnLabel);
       else window.addEventListener("resize", syncLeaveGameBtnLabel);
     } else {
       window.addEventListener("resize", syncLeaveGameBtnLabel);
+    }
+    if (window.matchMedia) {
+      const mq = window.matchMedia("(max-width: 900px)");
+      if (mq && typeof mq.addEventListener === "function") mq.addEventListener("change", syncVoiceControlsPlacement);
+      else window.addEventListener("resize", syncVoiceControlsPlacement);
+    } else {
+      window.addEventListener("resize", syncVoiceControlsPlacement);
     }
 
     const wrap = els.board.closest?.(".boardWrap");
@@ -427,6 +804,66 @@ async function bootstrap() {
       await refreshRoomOnce();
     });
 
+    if (els.voiceMicBtn) {
+      els.voiceMicBtn.addEventListener("click", async () => {
+        const gs = state.gameState;
+        const myId = state.session?.participantId || null;
+        if (!myId || !gs) return;
+        if (!canUseVoiceInBrowser()) return showToast("Голосовой чат не поддерживается браузером");
+        if (!Boolean(gs?.game?.voiceEnabled)) return showToast("Судья отключил голосовой чат");
+
+        if (state.voice.micMuted) {
+          try {
+            await voiceSetMicMuted(false);
+            showToast("Микрофон включён");
+          } catch {
+            state.voice.micMuted = true;
+            showToast("Не удалось включить микрофон");
+          }
+        } else {
+          await voiceSetMicMuted(true);
+          showToast("Микрофон выключен");
+        }
+
+        await syncVoiceFromGameState(gs);
+      });
+    }
+
+    if (els.voiceSpeakerBtn) {
+      els.voiceSpeakerBtn.addEventListener("click", async () => {
+        const gs = state.gameState;
+        const myId = state.session?.participantId || null;
+        if (!myId || !gs) return;
+        if (!canUseVoiceInBrowser()) return showToast("Голосовой чат не поддерживается браузером");
+
+        voiceSetSpeakerMuted(!state.voice.speakerMuted);
+        showToast(state.voice.speakerMuted ? "Динамик выключен" : "Динамик включён");
+        updateVoiceUi(gs);
+      });
+    }
+
+    if (els.voiceGlobalBtn) {
+      els.voiceGlobalBtn.addEventListener("click", async () => {
+        const gs = state.gameState;
+        const myId = state.session?.participantId || null;
+        if (!myId || !gs) return;
+        const me = (gs.participants || []).find((p) => p.id === myId) || null;
+        if (!me || !me.is_judge) return;
+        const current = Boolean(gs?.game?.voiceEnabled);
+        const next = !current;
+        const res = await api.judgeVoice(myId, { enabled: next });
+        if (!res.ok) {
+          if (res.status === 403 && res.body?.error === "not_judge") showToast("Только судья может управлять голосом");
+          else if (res.status === 403 && res.body?.error === "game_finished") showToast("Игра уже завершена");
+          else showToast("Не удалось изменить голосовой чат");
+          await refreshRoomOnce();
+          return;
+        }
+        showToast(next ? "Голосовой чат включён" : "Голосовой чат отключён");
+        await refreshRoomOnce();
+      });
+    }
+
     els.pickupQuaffleBtn.addEventListener("click", async () => {
       const gs = state.gameState;
       const myId = state.session?.participantId || null;
@@ -458,7 +895,14 @@ async function bootstrap() {
 
       state.duelUi.submitted = true;
       stopDuelAnimation();
-      const score = Math.max(0, Math.min(100, Number(state.duelUi.currentPercent || 0)));
+      let score = Math.max(0, Math.min(100, Number(state.duelUi.currentPercent || 0)));
+      const startedAtMs = Number(state.duelUi.startedAtMs);
+      const periodMs = Number(state.duelUi.periodMs);
+      if (Number.isFinite(startedAtMs) && Number.isFinite(periodMs) && periodMs > 0) {
+        const t = Math.max(0, Date.now() - startedAtMs);
+        const fill = triangleFill01(t, periodMs);
+        if (Number.isFinite(fill)) score = Math.max(0, Math.min(100, Math.round(fill * 100)));
+      }
       els.duelHint.textContent = `Твой результат: ${score}%. Ждём соперника…`;
 
       const res = await api.submitSteal(myId, { duelId: state.duelUi.duelId, score });
@@ -550,7 +994,7 @@ async function bootstrap() {
       const gs = state.gameState;
       const myId = state.session?.participantId || null;
       const me = myId && gs ? gs.participants.find((p) => p.id === myId) : null;
-      if (!me || me.is_observer || !isBeaterRole(me.role)) return;
+      if (!me || me.is_observer || (!isBeaterRole(me.role) && !isKeeperRole(me.role))) return;
 
       if (state.draft?.actionType === "hit_bludger") {
         state.draft.actionType = null;

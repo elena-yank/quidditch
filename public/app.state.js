@@ -16,7 +16,15 @@ const state = {
   lastAutoEndedStepNo: null,
   lastStunnedStepNo: null,
   lastMoveTap: null,
-  draft: { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null }
+  draft: { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null },
+  voice: {
+    micMuted: true,
+    speakerMuted: false,
+    lastSeq: 0,
+    pollInterval: null,
+    localStream: null,
+    peers: new Map()
+  }
 };
 
 const BOARD_ROWS = ["A", "B", "C", "D", "E", "F", "G"];
@@ -230,10 +238,16 @@ function hasAnyActionOption({ gameState, me, fromCoord }) {
   if (!me || me.is_observer) return false;
   if (isSeekerRole(me.role)) return false;
   if (isBeaterRole(me.role)) return canHitBludger({ gameState, fromCoord });
-  if (isChaserRole(me.role) || isKeeperRole(me.role)) {
+  if (isKeeperRole(me.role)) {
+    if (canHitBludger({ gameState, fromCoord })) return true;
     if (canPickupFreeQuaffle({ gameState, meRole: me.role, fromCoord })) return true;
     if (canThrowQuaffle({ gameState, me, fromCoord })) return true;
-    if (isChaserRole(me.role) && canStealQuaffle({ gameState, me, fromCoord })) return true;
+    return false;
+  }
+  if (isChaserRole(me.role)) {
+    if (canPickupFreeQuaffle({ gameState, meRole: me.role, fromCoord })) return true;
+    if (canThrowQuaffle({ gameState, me, fromCoord })) return true;
+    if (canStealQuaffle({ gameState, me, fromCoord })) return true;
     return false;
   }
   return false;

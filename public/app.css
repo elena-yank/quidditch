@@ -420,6 +420,12 @@ button:disabled {
   gap: 8px;
 }
 
+.voiceControls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .mePill {
   text-align: right;
 }
@@ -697,6 +703,21 @@ button.primary {
   .eventLog {
     height: 220px;
   }
+
+  .sideStatusRow {
+    grid-template-columns: 1fr 1fr auto;
+    align-items: center;
+  }
+
+  .sideStatusRow .voiceControls {
+    justify-content: flex-end;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .sideStatusRow .voiceControls .pillBtn {
+    width: auto;
+  }
 }
 
 @media (max-width: 900px) and (orientation: portrait) {
@@ -858,7 +879,7 @@ button.primary {
   }
 
   body.inRoom .cell.hitTarget::after {
-    border-width: clamp(2px, 0.9vw, 3px);
+    border-width: 0;
   }
 
   body.inRoom .cell.blocked::before {
@@ -1095,7 +1116,12 @@ button.primary {
 }
 
 .cell.hitTarget::after {
-  border: 3px solid rgba(255, 172, 65, 0.9);
+  border: none;
+  background: rgba(176, 53, 74, 0.18);
+}
+
+.cell.hitTarget:hover::after {
+  background: rgba(176, 53, 74, 0.26);
 }
 
 .piece {
@@ -1246,6 +1272,17 @@ button.primary {
 .overlayTitle {
   font-size: 16px;
   margin: 0 0 10px;
+}
+
+#confirmOverlay.overlay {
+  position: fixed;
+  z-index: 1000;
+  padding: 12px;
+}
+
+.confirmActions {
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 
 .bar {

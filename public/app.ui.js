@@ -339,11 +339,32 @@ function captureGameEvents(prevState, nextState) {
 }
 
 function triangleFill01(tMs, periodMs) {
+  if (!Number.isFinite(tMs) || !Number.isFinite(periodMs) || periodMs <= 0) return 0;
   const x = (tMs % periodMs) / (periodMs / 2);
   const v = 1 - Math.abs(x - 1);
   if (v < 0) return 0;
   if (v > 1) return 1;
   return v;
+}
+
+function ensureDuelBarFill() {
+  const root = els.duelBar || null;
+  if (!root) return null;
+  if (els.duelBarFill) return els.duelBarFill;
+
+  const existing = root.querySelector(".barFill");
+  if (existing) {
+    if (!existing.id) existing.id = "duelBarFill";
+    els.duelBarFill = existing;
+    return existing;
+  }
+
+  const el = document.createElement("div");
+  el.className = "barFill";
+  el.id = "duelBarFill";
+  root.appendChild(el);
+  els.duelBarFill = el;
+  return el;
 }
 
 function hideDuelOverlaySoon() {
@@ -357,24 +378,32 @@ function hideDuelOverlaySoon() {
 
 function stopDuelAnimation() {
   if (!state.duelUi) return;
-  if (state.duelUi.raf) cancelAnimationFrame(state.duelUi.raf);
+  const cancel = window.cancelAnimationFrame ? window.cancelAnimationFrame.bind(window) : clearTimeout;
+  if (state.duelUi.raf) cancel(state.duelUi.raf);
   state.duelUi.raf = null;
 }
 
 function startDuelAnimation() {
   stopDuelAnimation();
   if (!state.duelUi) return;
+  const barFill = ensureDuelBarFill();
+  if (!barFill) return;
+  const nextFrame = window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : (cb) => setTimeout(cb, 16);
   const tick = () => {
     if (!state.duelUi) return;
     if (state.duelUi.phase !== "active") return;
     const now = Date.now();
-    const t = now - state.duelUi.startedAtMs;
+    let t = now - state.duelUi.startedAtMs;
+    if (t < 0) {
+      state.duelUi.startedAtMs = now;
+      t = 0;
+    }
     const fill = triangleFill01(t, state.duelUi.periodMs);
     state.duelUi.currentPercent = Math.round(fill * 100);
-    els.duelBarFill.style.width = `${state.duelUi.currentPercent}%`;
-    state.duelUi.raf = requestAnimationFrame(tick);
+    barFill.style.width = `${state.duelUi.currentPercent}%`;
+    state.duelUi.raf = nextFrame(tick);
   };
-  state.duelUi.raf = requestAnimationFrame(tick);
+  state.duelUi.raf = nextFrame(tick);
 }
 
 function openDuelOverlay(duel, myId) {
@@ -390,7 +419,7 @@ function openDuelOverlay(duel, myId) {
 
   els.duelOverlay.classList.remove("hidden");
   const kind = String(duel.kind || "steal").toLowerCase();
-  els.duelTitle.textContent = kind === "pickup" ? "Борьба за квоффл" : "Выхват квоффла";
+  els.duelTitle.textContent = kind === "pickup" ? "Борьба за квоффл" : kind === "snitch" ? "Битва за снитч" : kind === "hit_bludger" ? "Битва за бладжер" : "Выхват квоффла";
 
   if (!state.duelUi || state.duelUi.duelId !== duel.id) {
     els.duelResult.textContent = "";
@@ -412,11 +441,14 @@ function openDuelOverlay(duel, myId) {
     state.duelUi.defenderName = defenderName;
   }
 
+  const barFill = ensureDuelBarFill();
+  if (barFill) barFill.style.width = "0%";
+
   if (duel.resolvedAt) {
     stopDuelAnimation();
     const a = duel.attackerScore ?? 0;
     const b = duel.defenderScore ?? 0;
-    els.duelBarFill.style.width = "0%";
+    if (barFill) barFill.style.width = "0%";
     els.duelHint.textContent = "";
     els.duelResult.textContent = `${attackerName}: ${a}%, ${defenderName}: ${b}%`;
     state.duelUi.phase = "resolved";
@@ -798,6 +830,24 @@ function updateQuaffleUi(gameState) {
     return;
   }
 
+  if (isKeeperRole(me.role)) {
+    const arr = Array.isArray(gameState.bludgers) ? gameState.bludgers : [];
+    const b1 = normalizeCoord(arr[0]);
+    const b2 = normalizeCoord(arr[1]);
+    const near1 = b1 ? chebyshevDistance(myPos, b1) === 1 : false;
+    const near2 = b2 ? chebyshevDistance(myPos, b2) === 1 : false;
+    const wantHit = chosenType === "hit_bludger";
+    const sentHit = showSentType === "hit_bludger";
+    if (sentHit || near1 || near2) {
+      els.hitBludgerBtn.classList.remove("hidden");
+      els.hitBludgerBtn.disabled = showSent || !(near1 || near2);
+      els.hitBludgerBtn.textContent = sentHit ? "Ударить бладжер ✓" : (wantHit ? "Отменить удар" : "Ударить бладжер");
+      els.hitBludgerBtn.classList.toggle("picked", wantHit && !showSent);
+      els.hitBludgerBtn.classList.toggle("sent", sentHit);
+      els.hitBludgerBtn.setAttribute("aria-pressed", wantHit || sentHit ? "true" : "false");
+    }
+  }
+
   if (!isChaserRole(me.role) && !isKeeperRole(me.role)) return;
 
   if (!q.holderId) {
@@ -960,8 +1010,16 @@ function renderPieces(gameState) {
             highlightTargets(from, moves, occupiedNow, reserved.size ? reserved : null);
           }
           const hasQuaffle = quaffleHolderId === me.id;
-          if (hasQuaffle && !actionReserved) {
+          if (hasQuaffle && !actionReserved && state.draft?.actionType !== "hit_bludger") {
             highlightKeeperThrowTargets(actionFrom);
+          }
+          if (!actionReserved && state.draft?.actionType === "hit_bludger") {
+            const arr = Array.isArray(gameState.bludgers) ? gameState.bludgers : [];
+            const idx = state.draft?.actionBludger === 2 ? 1 : 0;
+            const bCoord = normalizeCoord(arr[idx]);
+            if (bCoord && chebyshevDistance(actionFrom, bCoord) === 1) {
+              highlightHitTargets(gameState, bCoord);
+            }
           }
         } else if (isSeekerRole(me.role)) {
           if (!movedAlready && !alreadyMovedInDraft && !alreadyHasActionInDraft) {

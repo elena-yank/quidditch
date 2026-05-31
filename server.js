@@ -272,75 +272,123 @@ function chebyshevDistance(aCoord, bCoord) {
 }
 
 async function expireOldDuels(gameId) {
-  const duelRes = await pool.query(
-    `
-      SELECT id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at
-      FROM duels
-      WHERE game_id = $1 AND resolved_at IS NULL
-      ORDER BY started_at DESC
-      LIMIT 1
-    `,
-    [gameId]
-  );
-  const duel = duelRes.rows[0];
-  if (!duel) return;
-
-  const startedAt = new Date(duel.started_at).getTime();
-  if (!Number.isFinite(startedAt)) return;
-  if (Date.now() - startedAt <= 15000) return;
-
-  const gameRes = await pool.query("SELECT quaffle_holder_id, quaffle_pos, step_no FROM games WHERE id = $1", [gameId]);
-  const holderId = gameRes.rows[0]?.quaffle_holder_id || null;
-  const quafflePos = normalizeCoord(gameRes.rows[0]?.quaffle_pos) || "D7";
-  const stepNo = Number(gameRes.rows[0]?.step_no || 1);
-
-  const kind = String(duel.kind || "steal").toLowerCase();
-  const winnerId = duel.attacker_id;
-
-  await pool.query(
-    `
-      UPDATE duels
-      SET resolved_at = NOW(), winner_id = $2
-      WHERE id = $1 AND resolved_at IS NULL
-    `,
-    [duel.id, winnerId]
-  );
-
-  if (kind === "pickup") {
-    const expected = normalizeCoord(duel.target_pos) || quafflePos;
-    await pool.query(
-      `
-        UPDATE games
-        SET quaffle_holder_id = $2,
-            quaffle_pos = NULL,
-            quaffle_lock_holder_id = $2,
-            quaffle_lock_step_no = $3
-        WHERE id = $1 AND quaffle_holder_id IS NULL AND quaffle_pos = $4
-      `,
-      [gameId, winnerId, stepNo, expected]
-    );
-  } else {
-    if (holderId) {
-      await pool.query(
-        `
-          UPDATE games
-          SET quaffle_holder_id = $2,
-              quaffle_pos = NULL,
-              quaffle_lock_holder_id = $2,
-              quaffle_lock_step_no = $3,
-              quaffle_steal_cooldown_step_no = $3
-          WHERE id = $1 AND quaffle_holder_id = $4
-        `,
-        [gameId, winnerId, stepNo, holderId]
-      );
-    }
-  }
+  const stableBitFromId = (id) => {
+    const s = String(id || "");
+    let acc = 0;
+    for (let i = 0; i < s.length; i += 1) acc = (acc + s.charCodeAt(i)) | 0;
+    return (acc & 1) === 1;
+  };
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT id FROM games WHERE id = $1 FOR UPDATE", [gameId]);
-    await maybeAdvanceStep(client, gameId);
+
+    const duelRes = await client.query(
+      `
+        SELECT id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
+        FROM duels
+        WHERE game_id = $1 AND resolved_at IS NULL
+        ORDER BY started_at DESC
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [gameId]
+    );
+    const duel = duelRes.rows[0] || null;
+    if (!duel) {
+      await client.query("COMMIT");
+      return;
+    }
+    if (duel.resolved_at) {
+      await client.query("COMMIT");
+      return;
+    }
+
+    const startedAt = new Date(duel.started_at).getTime();
+    if (!Number.isFinite(startedAt)) {
+      await client.query("COMMIT");
+      return;
+    }
+    if (Date.now() - startedAt <= 15000) {
+      await client.query("COMMIT");
+      return;
+    }
+
+    const kind = String(duel.kind || "steal").toLowerCase();
+    const bothMissing = duel.attacker_score == null && duel.defender_score == null;
+    const attackerMissing = duel.attacker_score == null;
+    const defenderMissing = duel.defender_score == null;
+
+    const participantsRes = await client.query(
+      "SELECT id, is_bot, bot_difficulty FROM participants WHERE game_id = $1 AND id = ANY($2::text[])",
+      [duel.game_id, [duel.attacker_id, duel.defender_id]]
+    );
+    const byId = new Map(participantsRes.rows.map((r) => [r.id, r]));
+    const scoreForMissing = (pid) => {
+      const p = byId.get(pid) || null;
+      if (p?.is_bot) return botScoreForDuel(p.bot_difficulty);
+      return 0;
+    };
+
+    let attackerScore = duel.attacker_score != null ? Number(duel.attacker_score) : null;
+    let defenderScore = duel.defender_score != null ? Number(duel.defender_score) : null;
+
+    if (bothMissing) {
+      if (kind === "steal") {
+        attackerScore = 0;
+        defenderScore = 1;
+      } else {
+        const attackerWins = stableBitFromId(duel.id);
+        attackerScore = attackerWins ? 1 : 0;
+        defenderScore = attackerWins ? 0 : 1;
+      }
+    } else {
+      if (attackerMissing) attackerScore = scoreForMissing(duel.attacker_id);
+      if (defenderMissing) defenderScore = scoreForMissing(duel.defender_id);
+    }
+
+    if (!Number.isFinite(attackerScore)) attackerScore = 0;
+    if (!Number.isFinite(defenderScore)) defenderScore = 0;
+    attackerScore = Math.max(0, Math.min(100, Math.round(attackerScore)));
+    defenderScore = Math.max(0, Math.min(100, Math.round(defenderScore)));
+
+    await client.query(
+      `
+        UPDATE duels
+        SET attacker_score = COALESCE(attacker_score, $2),
+            defender_score = COALESCE(defender_score, $3)
+        WHERE id = $1 AND resolved_at IS NULL
+      `,
+      [duel.id, attackerScore, defenderScore]
+    );
+
+    const duelRes2 = await client.query(
+      `
+        SELECT id, game_id, attacker_id, defender_id, kind, target_pos, attacker_score, defender_score, resolved_at, winner_id
+        FROM duels
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [duel.id]
+    );
+    const duel2 = duelRes2.rows[0] || null;
+    const resolved = await resolveDuelIfReady(client, duel2);
+
+    if (!resolved.resolved) {
+      const a = attackerScore;
+      const b = defenderScore;
+      const winnerId = a >= b ? duel.attacker_id : duel.defender_id;
+      await client.query(
+        `
+          UPDATE duels
+          SET resolved_at = NOW(), winner_id = $2
+          WHERE id = $1 AND resolved_at IS NULL
+        `,
+        [duel.id, winnerId]
+      );
+      await maybeAdvanceStep(client, duel.game_id);
+    }
+
     await client.query("COMMIT");
   } catch {
     await client.query("ROLLBACK");
@@ -399,6 +447,7 @@ async function initDb() {
         score_a INTEGER NOT NULL DEFAULT 0,
         score_b INTEGER NOT NULL DEFAULT 0,
         paused BOOLEAN NOT NULL DEFAULT FALSE,
+        voice_enabled BOOLEAN NOT NULL DEFAULT TRUE,
         snitch_pos TEXT NULL,
         snitch_revealed BOOLEAN NOT NULL DEFAULT FALSE,
         snitch_caught_by_id TEXT NULL,
@@ -420,9 +469,13 @@ async function initDb() {
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS winner_team TEXT`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS paused BOOLEAN`);
+    await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS voice_enabled BOOLEAN`);
     await client.query(`UPDATE games SET started = TRUE WHERE started IS NULL`);
     await client.query(`UPDATE games SET finished = FALSE WHERE finished IS NULL`);
     await client.query(`UPDATE games SET paused = FALSE WHERE paused IS NULL`);
+    await client.query(`ALTER TABLE games ALTER COLUMN voice_enabled SET DEFAULT TRUE`);
+    await client.query(`UPDATE games SET voice_enabled = TRUE WHERE voice_enabled IS NULL`);
+    await client.query(`ALTER TABLE games ALTER COLUMN voice_enabled SET NOT NULL`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS score_a INTEGER`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS score_b INTEGER`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS snitch_pos TEXT`);
@@ -612,6 +665,20 @@ async function initDb() {
       ON turn_states (game_id, step_no, planned_to)
       WHERE planned_to IS NOT NULL
     `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS voice_signals (
+        seq BIGSERIAL PRIMARY KEY,
+        game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        from_id TEXT NOT NULL,
+        to_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS voice_signals_to_seq_idx ON voice_signals (to_id, seq)`);
+
     await client.query("COMMIT");
   } catch (e) {
     await client.query("ROLLBACK");
@@ -782,6 +849,8 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     [gameId]
   );
   if (activeDuelRes.rows[0]) return;
+
+  await client.query("SAVEPOINT step_apply");
 
   const participantsRes = await client.query(
     `
@@ -980,7 +1049,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     }
 
     if (actionType === "hit_bludger") {
-      if (!isBeaterRole(p.role)) continue;
+      if (!isBeaterRole(p.role) && !isKeeperRole(p.role)) continue;
       const targetIdx = p.planned_action_bludger != null ? Number(p.planned_action_bludger) : null;
       if (targetIdx !== 1 && targetIdx !== 2) continue;
       const bludgerFrom = targetIdx === 1 ? b1Pos : b2Pos;
@@ -1004,6 +1073,67 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const straightOrDiag =
         ((absR === 0 && absC > 0) || (absC === 0 && absR > 0) || (absR === absC && absR > 0)) && dist >= 1 && dist <= 3;
       if (!straightOrDiag) continue;
+
+      const duelTarget = `b${targetIdx}:pre`;
+      const contenders = [];
+      for (const pp of participants) {
+        if (Boolean(pp.stunned)) continue;
+        if (!Boolean(pp.planned_action_first)) continue;
+        const ppType = normalizePlannedActionType(pp.planned_action_type);
+        if (ppType !== "hit_bludger") continue;
+        if (!isBeaterRole(pp.role) && !isKeeperRole(pp.role)) continue;
+        const ppIdx = pp.planned_action_bludger != null ? Number(pp.planned_action_bludger) : null;
+        if (ppIdx !== targetIdx) continue;
+        const ppFrom = actionPosById.get(pp.id);
+        if (!ppFrom) continue;
+        const ppBludgerFrom = targetIdx === 1 ? b1Pos : b2Pos;
+        if (chebyshevDistance(ppFrom, ppBludgerFrom) !== 1) continue;
+        const ppTo = normalizeCoord(pp.planned_action_to);
+        if (!ppTo) continue;
+        if (!qHolderId) {
+          const freeQ = normalizeCoord(qPos) || "D7";
+          if (ppTo === freeQ) continue;
+        }
+        const ppA = coordToRC(ppBludgerFrom);
+        const ppT = coordToRC(ppTo);
+        if (!ppA || !ppT) continue;
+        const ppDr = ppT.r - ppA.r;
+        const ppDc = ppT.c - ppA.c;
+        const ppAbsR = Math.abs(ppDr);
+        const ppAbsC = Math.abs(ppDc);
+        const ppDist = Math.max(ppAbsR, ppAbsC);
+        const ppStraightOrDiag =
+          ((ppAbsR === 0 && ppAbsC > 0) || (ppAbsC === 0 && ppAbsR > 0) || (ppAbsR === ppAbsC && ppAbsR > 0)) && ppDist >= 1 && ppDist <= 3;
+        if (!ppStraightOrDiag) continue;
+        contenders.push(pp.id);
+      }
+
+      if (contenders.length >= 2) {
+        const existing = await client.query(
+          "SELECT id, winner_id, resolved_at FROM duels WHERE game_id = $1 AND created_step_no = $2 AND kind = $3 AND target_pos = $4 ORDER BY started_at DESC LIMIT 1",
+          [gameId, stepNo, "hit_bludger", duelTarget]
+        );
+        const duel = existing.rows[0] || null;
+        if (!duel) {
+          await client.query("ROLLBACK TO SAVEPOINT step_apply");
+          const duelId = nanoidId();
+          const ins = await client.query(
+            `
+              INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
+              VALUES ($1, $2, $3, $4, $5, $6, $7)
+              ON CONFLICT DO NOTHING
+            `,
+            [duelId, gameId, contenders[0], contenders[1], "hit_bludger", duelTarget, stepNo]
+          );
+          if (ins.rowCount > 0) return;
+          const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
+          if (active.rows[0]) return;
+        } else if (duel.winner_id && p.id !== duel.winner_id) {
+          continue;
+        }
+      }
+
+      if (bludgersHitThisStep.has(targetIdx)) continue;
 
       const stepR = dr === 0 ? 0 : Math.sign(dr);
       const stepC = dc === 0 ? 0 : Math.sign(dc);
@@ -1375,7 +1505,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     }
 
     if (actionType === "hit_bludger") {
-      if (!isBeaterRole(p.role)) continue;
+      if (!isBeaterRole(p.role) && !isKeeperRole(p.role)) continue;
       const targetIdx = p.planned_action_bludger != null ? Number(p.planned_action_bludger) : null;
       if (targetIdx !== 1 && targetIdx !== 2) continue;
       const bludgerFrom = targetIdx === 1 ? b1Pos : b2Pos;
@@ -1399,6 +1529,67 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const straightOrDiag =
         ((absR === 0 && absC > 0) || (absC === 0 && absR > 0) || (absR === absC && absR > 0)) && dist >= 1 && dist <= 3;
       if (!straightOrDiag) continue;
+
+      const duelTarget = `b${targetIdx}:post`;
+      const contenders = [];
+      for (const pp of participants) {
+        if (Boolean(pp.stunned)) continue;
+        if (Boolean(pp.planned_action_first)) continue;
+        const ppType = normalizePlannedActionType(pp.planned_action_type);
+        if (ppType !== "hit_bludger") continue;
+        if (!isBeaterRole(pp.role) && !isKeeperRole(pp.role)) continue;
+        const ppIdx = pp.planned_action_bludger != null ? Number(pp.planned_action_bludger) : null;
+        if (ppIdx !== targetIdx) continue;
+        const ppFrom = posById.get(pp.id);
+        if (!ppFrom) continue;
+        const ppBludgerFrom = targetIdx === 1 ? b1Pos : b2Pos;
+        if (chebyshevDistance(ppFrom, ppBludgerFrom) !== 1) continue;
+        const ppTo = normalizeCoord(pp.planned_action_to);
+        if (!ppTo) continue;
+        if (!qHolderId) {
+          const freeQ = normalizeCoord(qPos) || "D7";
+          if (ppTo === freeQ) continue;
+        }
+        const ppA = coordToRC(ppBludgerFrom);
+        const ppT = coordToRC(ppTo);
+        if (!ppA || !ppT) continue;
+        const ppDr = ppT.r - ppA.r;
+        const ppDc = ppT.c - ppA.c;
+        const ppAbsR = Math.abs(ppDr);
+        const ppAbsC = Math.abs(ppDc);
+        const ppDist = Math.max(ppAbsR, ppAbsC);
+        const ppStraightOrDiag =
+          ((ppAbsR === 0 && ppAbsC > 0) || (ppAbsC === 0 && ppAbsR > 0) || (ppAbsR === ppAbsC && ppAbsR > 0)) && ppDist >= 1 && ppDist <= 3;
+        if (!ppStraightOrDiag) continue;
+        contenders.push(pp.id);
+      }
+
+      if (contenders.length >= 2) {
+        const existing = await client.query(
+          "SELECT id, winner_id, resolved_at FROM duels WHERE game_id = $1 AND created_step_no = $2 AND kind = $3 AND target_pos = $4 ORDER BY started_at DESC LIMIT 1",
+          [gameId, stepNo, "hit_bludger", duelTarget]
+        );
+        const duel = existing.rows[0] || null;
+        if (!duel) {
+          await client.query("ROLLBACK TO SAVEPOINT step_apply");
+          const duelId = nanoidId();
+          const ins = await client.query(
+            `
+              INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
+              VALUES ($1, $2, $3, $4, $5, $6, $7)
+              ON CONFLICT DO NOTHING
+            `,
+            [duelId, gameId, contenders[0], contenders[1], "hit_bludger", duelTarget, stepNo]
+          );
+          if (ins.rowCount > 0) return;
+          const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
+          if (active.rows[0]) return;
+        } else if (duel.winner_id && p.id !== duel.winner_id) {
+          continue;
+        }
+      }
+
+      if (bludgersHitThisStep.has(targetIdx)) continue;
 
       const stepR = dr === 0 ? 0 : Math.sign(dr);
       const stepC = dc === 0 ? 0 : Math.sign(dc);
@@ -1532,7 +1723,9 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
   }
 
   if (!snitchCaughtById) {
-    let caughtByTeam = null;
+    const seekerUpdates = [];
+    const reachers = [];
+
     for (const p of participants) {
       if (!isSeekerRole(p.role)) continue;
       if (Boolean(p.stunned)) continue;
@@ -1544,24 +1737,53 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       if (delta <= 0) continue;
       const current = p.snitch_progress != null ? Math.max(0, Number(p.snitch_progress) || 0) : 0;
       const next = Math.min(100, current + delta);
-      if (next !== current) {
-        await client.query("UPDATE participants SET snitch_progress = $2 WHERE id = $1 AND game_id = $3", [p.id, next, gameId]);
-        p.snitch_progress = next;
+      if (next !== current) seekerUpdates.push({ id: p.id, next });
+      if (next >= 100) reachers.push({ id: p.id, team: p.team });
+    }
+
+    for (const u of seekerUpdates) {
+      await client.query("UPDATE participants SET snitch_progress = $2 WHERE id = $1 AND game_id = $3", [u.id, u.next, gameId]);
+      const p = participants.find((pp) => pp.id === u.id) || null;
+      if (p) p.snitch_progress = u.next;
+    }
+
+    if (reachers.length >= 2) {
+      await client.query("ROLLBACK TO SAVEPOINT step_apply");
+      const duelId = nanoidId();
+      const a = reachers[0].id;
+      const b = reachers[1].id;
+      const ins = await client.query(
+        `
+          INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT DO NOTHING
+        `,
+        [duelId, gameId, a, b, "snitch", snitchPos, stepNo]
+      );
+      if (ins.rowCount > 0) {
+        await client.query("UPDATE participants SET snitch_progress = 100 WHERE game_id = $1 AND id = ANY($2::text[])", [gameId, [a, b]]);
+        return;
       }
-      if (next >= 100) {
-        snitchCaughtById = p.id;
-        snitchCaughtStepNo = stepNo;
-        await client.query(
-          "UPDATE participants SET stat_snitch_catches = COALESCE(stat_snitch_catches, 0) + 1 WHERE id = $1 AND game_id = $2",
-          [p.id, gameId]
-        );
-        caughtByTeam = p.team;
-        break;
+      const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
+      if (active.rows[0]) {
+        await client.query("UPDATE participants SET snitch_progress = 100 WHERE game_id = $1 AND id = ANY($2::text[])", [gameId, [a, b]]);
+        return;
       }
     }
-    if (snitchCaughtById && caughtByTeam) {
-      if (caughtByTeam === gameForSpawn.team_a) scoreA += 30;
-      else if (caughtByTeam === gameForSpawn.team_b) scoreB += 30;
+
+    if (reachers.length === 1) {
+      const catcherId = reachers[0].id;
+      const caughtByTeam = reachers[0].team || null;
+      snitchCaughtById = catcherId;
+      snitchCaughtStepNo = stepNo;
+      await client.query(
+        "UPDATE participants SET stat_snitch_catches = COALESCE(stat_snitch_catches, 0) + 1 WHERE id = $1 AND game_id = $2",
+        [catcherId, gameId]
+      );
+      if (caughtByTeam) {
+        if (caughtByTeam === gameForSpawn.team_a) scoreA += 30;
+        else if (caughtByTeam === gameForSpawn.team_b) scoreB += 30;
+      }
     }
   }
 
@@ -2078,7 +2300,10 @@ async function autoEndTurnsInGame(client, gameId) {
           canChaserThrow({ from, participant: p, game }) ||
           (await canChaserSteal({ client, from, participant: p, game, tsById }));
       } else if (isKeeperRole(p.role)) {
-        actionRemaining = canKeeperThrow({ from, participant: p, game });
+        const b1 = normalizeCoord(game.bludger1_pos) || "A7";
+        const b2 = normalizeCoord(game.bludger2_pos) || "G7";
+        const canHitBludger = chebyshevDistance(from, b1) === 1 || chebyshevDistance(from, b2) === 1;
+        actionRemaining = canKeeperThrow({ from, participant: p, game }) || canHitBludger;
       }
     }
 
@@ -2126,7 +2351,7 @@ app.post("/api/games", async (req, res) => {
     const code = nanoidRoom();
     try {
       await pool.query(
-        "INSERT INTO games (id, code, team_a, team_b, score_a, score_b, snitch_pos, quaffle_pos, quaffle_holder_id, bludger1_pos, bludger2_pos, step_no) VALUES ($1, $2, $3, $4, 0, 0, $5, $6, $7, $8, $9, $10)",
+        "INSERT INTO games (id, code, team_a, team_b, score_a, score_b, voice_enabled, snitch_pos, quaffle_pos, quaffle_holder_id, bludger1_pos, bludger2_pos, step_no) VALUES ($1, $2, $3, $4, 0, 0, TRUE, $5, $6, $7, $8, $9, $10)",
         [id, code, teamA, teamB, snitchPos, "D7", null, "A7", "G7", 1]
       );
       return res.status(201).json({ code, gameId: id, teamA, teamB });
@@ -2158,7 +2383,7 @@ app.post("/api/judge/games", async (req, res) => {
     try {
       await client.query("BEGIN");
       await client.query(
-        "INSERT INTO games (id, code, team_a, team_b, started, started_at, score_a, score_b, snitch_pos, quaffle_pos, quaffle_holder_id, bludger1_pos, bludger2_pos, step_no) VALUES ($1, $2, $3, $4, FALSE, NULL, 0, 0, $5, $6, $7, $8, $9, $10)",
+        "INSERT INTO games (id, code, team_a, team_b, started, started_at, score_a, score_b, voice_enabled, snitch_pos, quaffle_pos, quaffle_holder_id, bludger1_pos, bludger2_pos, step_no) VALUES ($1, $2, $3, $4, FALSE, NULL, 0, 0, TRUE, $5, $6, $7, $8, $9, $10)",
         [gameId, code, teamA, teamB, snitchPos, "D7", null, "A7", "G7", 1]
       );
       await client.query(
@@ -2210,14 +2435,47 @@ async function resolveDuelIfReady(client, duelRow) {
   const kind = String(duelRow.kind || "steal").toLowerCase();
 
   const gameRes = await client.query(
-    "SELECT step_no, quaffle_holder_id, quaffle_pos FROM games WHERE id = $1 FOR UPDATE",
+    "SELECT step_no, team_a, team_b, score_a, score_b, snitch_caught_by_id, quaffle_holder_id, quaffle_pos FROM games WHERE id = $1 FOR UPDATE",
     [duelRow.game_id]
   );
   const stepNo = Number(gameRes.rows[0]?.step_no || 1);
+  const teamA = gameRes.rows[0]?.team_a || null;
+  const teamB = gameRes.rows[0]?.team_b || null;
+  const scoreA0 = gameRes.rows[0]?.score_a != null ? Number(gameRes.rows[0].score_a) : 0;
+  const scoreB0 = gameRes.rows[0]?.score_b != null ? Number(gameRes.rows[0].score_b) : 0;
+  const alreadyCaughtById = gameRes.rows[0]?.snitch_caught_by_id || null;
   const qHolderId = gameRes.rows[0]?.quaffle_holder_id || null;
   const qPos = normalizeCoord(gameRes.rows[0]?.quaffle_pos) || "D7";
 
-  if (kind === "pickup") {
+  if (kind === "snitch") {
+    if (!alreadyCaughtById) {
+      const winnerRes = await client.query("SELECT team FROM participants WHERE id = $1 AND game_id = $2 FOR UPDATE", [winnerId, duelRow.game_id]);
+      const winnerTeam = winnerRes.rows[0]?.team || null;
+      let scoreA = scoreA0;
+      let scoreB = scoreB0;
+      if (winnerTeam && teamA && winnerTeam === teamA) scoreA += 30;
+      else if (winnerTeam && teamB && winnerTeam === teamB) scoreB += 30;
+
+      const upd = await client.query(
+        `
+          UPDATE games
+          SET score_a = $3,
+              score_b = $4,
+              snitch_revealed = FALSE,
+              snitch_caught_by_id = $2,
+              snitch_caught_step_no = $5
+          WHERE id = $1 AND snitch_caught_by_id IS NULL
+        `,
+        [duelRow.game_id, winnerId, scoreA, scoreB, stepNo]
+      );
+      if ((upd.rowCount || 0) > 0) {
+        await client.query(
+          "UPDATE participants SET stat_snitch_catches = COALESCE(stat_snitch_catches, 0) + 1 WHERE id = $1 AND game_id = $2",
+          [winnerId, duelRow.game_id]
+        );
+      }
+    }
+  } else if (kind === "pickup") {
     const expected = normalizeCoord(duelRow.target_pos) || qPos;
     const upd = await client.query(
       `
@@ -2743,7 +3001,7 @@ app.get("/api/games/:code/state", async (req, res) => {
   const viewerId = String(req.query?.viewerId || "").trim();
 
   const gameRes = await pool.query(
-    "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, snitch_pos, snitch_revealed, snitch_caught_by_id, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, created_at FROM games WHERE code = $1",
+    "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, voice_enabled, snitch_pos, snitch_revealed, snitch_caught_by_id, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, created_at FROM games WHERE code = $1",
     [code]
   );
   const game = gameRes.rows[0];
@@ -2767,7 +3025,7 @@ app.get("/api/games/:code/state", async (req, res) => {
   const botsRan = startedEffective0 && !Boolean(game.finished) && !Boolean(game.paused) ? await maybeRunBots(game.id) : { changed: false };
   if (botsRan.changed) {
     const gameRes2 = await pool.query(
-      "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, snitch_pos, snitch_revealed, snitch_caught_by_id, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, created_at FROM games WHERE code = $1",
+      "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, voice_enabled, snitch_pos, snitch_revealed, snitch_caught_by_id, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, created_at FROM games WHERE code = $1",
       [code]
     );
     const nextGame = gameRes2.rows[0];
@@ -2783,6 +3041,7 @@ app.get("/api/games/:code/state", async (req, res) => {
     game.score_a = nextGame.score_a;
     game.score_b = nextGame.score_b;
     game.paused = nextGame.paused;
+    game.voice_enabled = nextGame.voice_enabled;
     game.snitch_pos = nextGame.snitch_pos;
     game.snitch_revealed = nextGame.snitch_revealed;
     game.snitch_caught_by_id = nextGame.snitch_caught_by_id;
@@ -2894,6 +3153,7 @@ app.get("/api/games/:code/state", async (req, res) => {
       scoreA: Number(game.score_a || 0),
       scoreB: Number(game.score_b || 0),
       paused: Boolean(game.paused),
+      voiceEnabled: Boolean(game.voice_enabled),
       stepNo: stepNo,
       createdAt: game.created_at
     },
@@ -2957,6 +3217,164 @@ app.get("/api/games/:code/state", async (req, res) => {
         }
       : null
   });
+});
+
+app.get("/api/participants/:id/voice/poll", async (req, res) => {
+  const participantId = String(req.params.id || "").trim();
+  if (!participantId) return res.status(400).json({ error: "invalid_participant" });
+
+  const sinceRaw = req.query?.since;
+  const since = sinceRaw == null ? 0 : Number.parseInt(String(sinceRaw), 10);
+  const sinceSeq = Number.isFinite(since) && since > 0 ? since : 0;
+
+  const meRes = await pool.query(
+    `
+      SELECT p.id, p.game_id, p.is_bot, g.voice_enabled
+      FROM participants p
+      JOIN games g ON g.id = p.game_id
+      WHERE p.id = $1
+    `,
+    [participantId]
+  );
+  const me = meRes.rows[0] || null;
+  if (!me) return res.status(404).json({ error: "not_found" });
+  if (Boolean(me.is_bot)) return res.status(403).json({ error: "not_allowed" });
+
+  try {
+    await pool.query("DELETE FROM voice_signals WHERE game_id = $1 AND created_at < NOW() - INTERVAL '2 hours'", [me.game_id]);
+  } catch {}
+
+  const rowsRes = await pool.query(
+    `
+      SELECT seq, from_id, kind, payload, created_at
+      FROM voice_signals
+      WHERE game_id = $1 AND to_id = $2 AND seq > $3
+      ORDER BY seq ASC
+      LIMIT 50
+    `,
+    [me.game_id, participantId, sinceSeq]
+  );
+
+  res.json({
+    voiceEnabled: Boolean(me.voice_enabled),
+    signals: (rowsRes.rows || []).map((r) => ({
+      seq: Number(r.seq),
+      fromId: r.from_id,
+      kind: r.kind,
+      payload: r.payload ?? null,
+      createdAt: r.created_at
+    }))
+  });
+});
+
+app.post("/api/participants/:id/voice/send", async (req, res) => {
+  const fromId = String(req.params.id || "").trim();
+  if (!fromId) return res.status(400).json({ error: "invalid_participant" });
+
+  const toId = String(req.body?.toId || "").trim();
+  const kind = String(req.body?.kind || "").trim();
+  const payload = req.body?.payload ?? {};
+  if (!toId) return res.status(400).json({ error: "invalid_to" });
+
+  const allowedKinds = new Set(["offer", "answer", "ice", "hangup"]);
+  if (!allowedKinds.has(kind)) return res.status(400).json({ error: "invalid_kind" });
+
+  let payloadSize = 0;
+  try {
+    payloadSize = Buffer.byteLength(JSON.stringify(payload ?? {}), "utf8");
+  } catch {
+    return res.status(400).json({ error: "invalid_payload" });
+  }
+  if (payloadSize > 12_000) return res.status(413).json({ error: "payload_too_large" });
+
+  const fromRes = await pool.query(
+    `
+      SELECT p.id, p.game_id, p.is_bot, g.voice_enabled
+      FROM participants p
+      JOIN games g ON g.id = p.game_id
+      WHERE p.id = $1
+    `,
+    [fromId]
+  );
+  const from = fromRes.rows[0] || null;
+  if (!from) return res.status(404).json({ error: "not_found" });
+  if (Boolean(from.is_bot)) return res.status(403).json({ error: "not_allowed" });
+  if (!Boolean(from.voice_enabled)) return res.status(403).json({ error: "voice_disabled" });
+
+  const toRes = await pool.query("SELECT id, game_id, is_bot FROM participants WHERE id = $1", [toId]);
+  const to = toRes.rows[0] || null;
+  if (!to) return res.status(404).json({ error: "to_not_found" });
+  if (Boolean(to.is_bot)) return res.status(403).json({ error: "not_allowed" });
+  if (to.game_id !== from.game_id) return res.status(403).json({ error: "not_same_game" });
+
+  const insertRes = await pool.query(
+    `
+      INSERT INTO voice_signals (game_id, from_id, to_id, kind, payload)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING seq
+    `,
+    [from.game_id, fromId, toId, kind, payload ?? {}]
+  );
+
+  res.json({ ok: true, seq: Number(insertRes.rows[0]?.seq || 0) });
+});
+
+app.post("/api/judge/:judgeId/voice", async (req, res) => {
+  const judgeId = String(req.params.judgeId || "").trim();
+  if (!judgeId) return res.status(400).json({ error: "invalid_judge" });
+
+  const enabledRaw = req.body?.enabled;
+  const enabled = typeof enabledRaw === "boolean" ? enabledRaw : null;
+  if (enabled == null) return res.status(400).json({ error: "invalid_enabled" });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const judgeRes = await client.query(
+      `
+        SELECT p.id, p.game_id, p.is_judge, g.finished
+        FROM participants p
+        JOIN games g ON g.id = p.game_id
+        WHERE p.id = $1
+        FOR UPDATE
+      `,
+      [judgeId]
+    );
+    const judge = judgeRes.rows[0] || null;
+    if (!judge) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "not_found" });
+    }
+    if (!Boolean(judge.is_judge)) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "not_judge" });
+    }
+    if (Boolean(judge.finished)) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "game_finished" });
+    }
+
+    await client.query("UPDATE games SET voice_enabled = $2 WHERE id = $1", [judge.game_id, enabled]);
+
+    if (!enabled) {
+      const participantsRes = await client.query("SELECT id, is_bot FROM participants WHERE game_id = $1", [judge.game_id]);
+      for (const p of participantsRes.rows || []) {
+        if (Boolean(p.is_bot)) continue;
+        await client.query(
+          "INSERT INTO voice_signals (game_id, from_id, to_id, kind, payload) VALUES ($1, $2, $3, 'hangup', $4)",
+          [judge.game_id, judgeId, p.id, { reason: "judge_disabled_all" }]
+        );
+      }
+    }
+
+    await client.query("COMMIT");
+    res.json({ ok: true, enabled });
+  } catch {
+    await client.query("ROLLBACK");
+    res.status(500).json({ error: "db_error" });
+  } finally {
+    client.release();
+  }
 });
 
 app.get("/api/games/:code/logs", async (req, res) => {
@@ -3214,6 +3632,7 @@ app.post("/api/games/:code/participants", async (req, res) => {
   const isObserver = mode === "observer";
   const role = isObserver ? null : normalizeRole(req.body?.role);
   if (!isObserver && !role) return res.status(400).json({ error: "invalid_role" });
+  const force = Boolean(req.body?.force);
 
   const client = await pool.connect();
   try {
@@ -3241,7 +3660,7 @@ app.post("/api/games/:code/participants", async (req, res) => {
     if (!isObserver && role) {
       const existingRes = await client.query(
         `
-          SELECT id, is_bot
+          SELECT id, nickname, is_bot
           FROM participants
           WHERE game_id = $1 AND team = $2 AND role = $3 AND is_observer = FALSE
           LIMIT 1
@@ -3253,8 +3672,15 @@ app.post("/api/games/:code/participants", async (req, res) => {
       if (existing && existing.is_bot) {
         await client.query("DELETE FROM participants WHERE id = $1", [existing.id]);
       } else if (existing) {
-        await client.query("ROLLBACK");
-        return res.status(409).json({ error: "role_taken" });
+        if (!force) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({ error: "role_taken", takenBy: { id: existing.id, nickname: existing.nickname } });
+        }
+        const removed = await removeParticipantTx(client, existing.id, { advance: false });
+        if (!removed.ok) {
+          await client.query("ROLLBACK");
+          return res.status(removed.status || 500).json({ error: removed.error || "db_error" });
+        }
       }
     }
 
@@ -3296,7 +3722,22 @@ app.post("/api/games/:code/participants", async (req, res) => {
   } catch (e) {
     await client.query("ROLLBACK");
     if (e && e.code === "23505") {
-      if (String(e.constraint || "") === "participants_unique_role") return res.status(409).json({ error: "role_taken" });
+      if (String(e.constraint || "") === "participants_unique_role") {
+        let takenBy = null;
+        try {
+          const gRes = await client.query("SELECT id FROM games WHERE code = $1", [code]);
+          const gameId = gRes.rows[0]?.id || null;
+          if (gameId && team && role) {
+            const tRes = await client.query(
+              "SELECT id, nickname FROM participants WHERE game_id = $1 AND team = $2 AND role = $3 AND is_observer = FALSE LIMIT 1",
+              [gameId, team, role]
+            );
+            const t = tRes.rows[0] || null;
+            if (t) takenBy = { id: t.id, nickname: t.nickname };
+          }
+        } catch {}
+        return res.status(409).json(takenBy ? { error: "role_taken", takenBy } : { error: "role_taken" });
+      }
       if (String(e.constraint || "") === "participants_unique_pos") return res.status(409).json({ error: "cell_taken" });
       return res.status(409).json({ error: "conflict" });
     }
@@ -3553,7 +3994,7 @@ app.post("/api/participants/:id/turn/end", async (req, res) => {
     }
 
     if (actionType === "hit_bludger") {
-      if (!isBeaterRole(p.role)) {
+      if (!isBeaterRole(p.role) && !isKeeperRole(p.role)) {
         await client.query("ROLLBACK");
         return res.status(400).json({ error: "role_cannot_hit" });
       }

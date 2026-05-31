@@ -189,6 +189,34 @@
                   <path d="M4 20h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
                 </svg>
               </button>
+              <div class="voiceControls" id="voiceControls">
+                <button class="pillBtn iconOnly" id="voiceMicBtn" type="button" title="Микрофон выключен" aria-label="Микрофон выключен" aria-pressed="false">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" data-icon="mic-off">
+                    <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                    <path d="M9 9v3a3 3 0 0 0 5.12 2.12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M15 9V4a3 3 0 0 0-5.71-1.28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M19 11v1a7 7 0 0 1-11.56 5.22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M5 11v1a7 7 0 0 0 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M12 19v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                  </svg>
+                </button>
+                <button class="pillBtn iconOnly" id="voiceSpeakerBtn" type="button" title="Динамик включён" aria-label="Динамик включён" aria-pressed="true">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" data-icon="volume">
+                    <path d="M11 5L6 9H3v6h3l5 4V5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"></path>
+                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                  </svg>
+                </button>
+                <button class="pillBtn iconOnly hidden" id="voiceGlobalBtn" type="button" title="Отключить голос для всех" aria-label="Отключить голос для всех">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" data-icon="voice-off">
+                    <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                    <path d="M9 9v3a3 3 0 0 0 5.12 2.12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M15 9V4a3 3 0 0 0-5.71-1.28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M19 11v1a7 7 0 0 1-11.56 5.22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M5 11v1a7 7 0 0 0 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                  </svg>
+                </button>
+              </div>
               <div class="pill mePill" id="meLabel"></div>
             </div>
           </div>
@@ -289,6 +317,17 @@
         <div class="resultsTableWrap" id="resultsTableWrap"></div>
         <div class="resultsActions">
           <button class="primary" id="resultsSaveBtn" type="button">сохранить как изображение</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="overlay hidden" id="confirmOverlay" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <div class="overlayCard">
+        <div class="overlayTitle" id="confirmTitle"></div>
+        <div class="overlayText" id="confirmText"></div>
+        <div class="actions confirmActions">
+          <button class="primary" id="confirmOkBtn" type="button">Войти</button>
+          <button id="confirmCancelBtn" type="button">Отмена</button>
         </div>
       </div>
     </div>

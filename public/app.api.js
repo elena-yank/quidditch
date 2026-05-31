@@ -72,4 +72,26 @@ const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" }
     }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() }))
+  ,
+  voicePoll: (participantId, sinceSeq) => {
+    const since = sinceSeq != null ? Number(sinceSeq) : 0;
+    const q = Number.isFinite(since) && since > 0 ? `?since=${encodeURIComponent(String(since))}` : "";
+    return fetch(`/api/participants/${encodeURIComponent(participantId)}/voice/poll${q}`).then(async (r) => ({
+      ok: r.ok,
+      status: r.status,
+      body: await r.json()
+    }));
+  },
+  voiceSend: (participantId, payload) =>
+    fetch(`/api/participants/${encodeURIComponent(participantId)}/voice/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {})
+    }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() })),
+  judgeVoice: (judgeId, payload) =>
+    fetch(`/api/judge/${encodeURIComponent(judgeId)}/voice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {})
+    }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() }))
 };

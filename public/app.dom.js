@@ -34,6 +34,10 @@ const els = {
   exportLogsBtn: $("exportLogsBtn"),
   snitchStatus: $("snitchStatus"),
   scoreStatus: $("scoreStatus"),
+  voiceControls: $("voiceControls"),
+  voiceMicBtn: $("voiceMicBtn"),
+  voiceSpeakerBtn: $("voiceSpeakerBtn"),
+  voiceGlobalBtn: $("voiceGlobalBtn"),
   sidePanel: $("sidePanel"),
   sideTopArea: $("sideTopArea"),
   eventsStack: $("eventsStack"),
@@ -60,6 +64,11 @@ const els = {
   resultsCloseBtn: $("resultsCloseBtn"),
   resultsSaveBtn: $("resultsSaveBtn"),
   toast: $("toast"),
+  confirmOverlay: $("confirmOverlay"),
+  confirmTitle: $("confirmTitle"),
+  confirmText: $("confirmText"),
+  confirmOkBtn: $("confirmOkBtn"),
+  confirmCancelBtn: $("confirmCancelBtn"),
 
   createTeamA: $("createTeamA"),
   createTeamB: $("createTeamB"),
@@ -117,6 +126,63 @@ async function copyToClipboard(text) {
 function saveSession(next) {
   state.session = next;
   sessionStorage.setItem(sessionKey, JSON.stringify(next));
+}
+
+let confirmResolver = null;
+let confirmOverlayInited = false;
+
+function closeConfirmOverlay(result) {
+  if (!els.confirmOverlay) return;
+  els.confirmOverlay.classList.add("hidden");
+  const r = confirmResolver;
+  confirmResolver = null;
+  if (typeof r === "function") r(!!result);
+}
+
+function initConfirmOverlay() {
+  if (confirmOverlayInited) return;
+  if (!els.confirmOverlay || !els.confirmOkBtn || !els.confirmCancelBtn) return;
+
+  els.confirmOkBtn.addEventListener("click", () => closeConfirmOverlay(true));
+  els.confirmCancelBtn.addEventListener("click", () => closeConfirmOverlay(false));
+  els.confirmOverlay.addEventListener("click", (e) => {
+    if (e.target === els.confirmOverlay) closeConfirmOverlay(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!els.confirmOverlay || els.confirmOverlay.classList.contains("hidden")) return;
+    closeConfirmOverlay(false);
+  });
+
+  confirmOverlayInited = true;
+}
+
+function openConfirmOverlay({ title, text, okText, cancelText } = {}) {
+  initConfirmOverlay();
+  if (!els.confirmOverlay || !els.confirmOkBtn || !els.confirmCancelBtn || !els.confirmTitle || !els.confirmText) {
+    const msg = [title, text].filter(Boolean).join("\n\n");
+    return Promise.resolve(window.confirm(msg));
+  }
+
+  if (confirmResolver) {
+    const prev = confirmResolver;
+    confirmResolver = null;
+    prev(false);
+  }
+
+  els.confirmTitle.textContent = title ? String(title) : "";
+  els.confirmText.textContent = text ? String(text) : "";
+  els.confirmOkBtn.textContent = okText ? String(okText) : "Ок";
+  els.confirmCancelBtn.textContent = cancelText ? String(cancelText) : "Отмена";
+
+  els.confirmOverlay.classList.remove("hidden");
+  try {
+    els.confirmOkBtn.focus();
+  } catch {}
+
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+  });
 }
 
 function loadSession() {
