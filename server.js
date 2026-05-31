@@ -1982,7 +1982,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 }
 
 function getPositionForParticipant(p, game) {
-  const pos = p.pos || defaultSpawnCoord({ role: p.role, team: p.team, teamA: game.team_a, teamB: game.team_b });
+  const pos = normalizeCoord(p.pos) || defaultSpawnCoord({ role: p.role, team: p.team, teamA: game.team_a, teamB: game.team_b });
   return pos || null;
 }
 
@@ -3574,7 +3574,7 @@ app.post("/api/participants/:id/plan/move", async (req, res) => {
     }
 
     const gameForSpawn = { id: p.game_id, team_a: p.team_a, team_b: p.team_b };
-    const from = p.pos || defaultSpawnCoord({ role: p.role, team: p.team, teamA: p.team_a, teamB: p.team_b });
+    const from = getPositionForParticipant(p, gameForSpawn);
     if (!from) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "no_position" });

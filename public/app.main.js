@@ -102,9 +102,20 @@ function syncVoiceControlsPlacement() {
   const isInRoom = document.body.classList.contains("inRoom");
   const isMobile = window.matchMedia && window.matchMedia("(max-width: 900px)").matches;
   const statusRow = els.sideTopArea?.querySelector?.(".sideStatusRow") || null;
+  const titleLeft = els.observersOpenBtn?.parentElement || null;
 
   if (isInRoom && isMobile && statusRow) {
     if (els.voiceControls.parentElement !== statusRow) statusRow.appendChild(els.voiceControls);
+    return;
+  }
+
+  if (isInRoom && !isMobile && titleLeft && els.observersOpenBtn) {
+    if (els.voiceControls.parentElement !== titleLeft) {
+      titleLeft.insertBefore(els.voiceControls, els.observersOpenBtn.nextSibling);
+    } else {
+      const prev = els.voiceControls.previousElementSibling;
+      if (prev !== els.observersOpenBtn) titleLeft.insertBefore(els.voiceControls, els.observersOpenBtn.nextSibling);
+    }
     return;
   }
 
