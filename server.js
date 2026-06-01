@@ -995,9 +995,10 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 
   for (const p of participants) {
     if (Boolean(p.stunned)) continue;
-    if (!Boolean(p.planned_action_first)) continue;
     const actionType = normalizePlannedActionType(p.planned_action_type);
     if (!actionType) continue;
+    const allowPreMove = Boolean(p.planned_action_first) || actionType === "steal";
+    if (!allowPreMove) continue;
     const from = actionPosById.get(p.id);
     if (!from) continue;
 
