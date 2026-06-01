@@ -20,6 +20,7 @@ const state = {
   voice: {
     micMuted: true,
     speakerMuted: false,
+    audioUnlocked: false,
     lastSeq: 0,
     pollInterval: null,
     localStream: null,

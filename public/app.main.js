@@ -160,6 +160,45 @@ function voiceSetSpeakerMuted(nextMuted) {
   }
 }
 
+function voiceUnlockAudioPlayback() {
+  state.voice.audioUnlocked = true;
+  for (const peer of state.voice.peers.values()) {
+    const a = peer?.audioEl;
+    if (!a) continue;
+    a.muted = Boolean(state.voice.speakerMuted);
+    a.play?.().catch(() => {});
+  }
+}
+
+async function voiceAddIceCandidate(peer, payload) {
+  if (!peer?.pc || peer.pc.connectionState === "closed") return;
+  if (!payload) return;
+  const pc = peer.pc;
+  const hasRemote = Boolean(pc.remoteDescription && pc.remoteDescription.type);
+  if (!hasRemote) {
+    if (!Array.isArray(peer.pendingIce)) peer.pendingIce = [];
+    peer.pendingIce.push(payload);
+    return;
+  }
+  try {
+    await pc.addIceCandidate(payload);
+  } catch {}
+}
+
+async function voiceFlushIce(peer) {
+  if (!peer?.pc || peer.pc.connectionState === "closed") return;
+  const pc = peer.pc;
+  const hasRemote = Boolean(pc.remoteDescription && pc.remoteDescription.type);
+  if (!hasRemote) return;
+  const pending = Array.isArray(peer.pendingIce) ? peer.pendingIce : [];
+  peer.pendingIce = [];
+  for (const c of pending) {
+    try {
+      if (c) await pc.addIceCandidate(c);
+    } catch {}
+  }
+}
+
 async function voiceEnsureLocalStream() {
   if (state.voice.localStream) return state.voice.localStream;
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("getUserMedia_unavailable");
@@ -260,7 +299,7 @@ function voiceEnsurePeer(peerId) {
   audioEl.style.display = "none";
   document.body.appendChild(audioEl);
 
-  const peer = { peerId, pc, audioEl, audioTransceiver, isInitiator, makingOffer: false };
+  const peer = { peerId, pc, audioEl, audioTransceiver, isInitiator, makingOffer: false, pendingIce: [] };
   state.voice.peers.set(peerId, peer);
 
   pc.onicecandidate = (e) => {
@@ -308,6 +347,7 @@ async function voiceHandleSignal(signal) {
   if (kind === "offer") {
     try {
       await pc.setRemoteDescription(payload);
+      await voiceFlushIce(peer);
       await voiceAttachLocalTrackToPeer(peer);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -320,14 +360,13 @@ async function voiceHandleSignal(signal) {
   if (kind === "answer") {
     try {
       await pc.setRemoteDescription(payload);
+      await voiceFlushIce(peer);
     } catch {}
     return;
   }
 
   if (kind === "ice") {
-    try {
-      if (payload) await pc.addIceCandidate(payload);
-    } catch {}
+    await voiceAddIceCandidate(peer, payload);
   }
 }
 
@@ -910,6 +949,7 @@ async function bootstrap() {
         if (!myId || !gs) return;
         if (!canUseVoiceInBrowser()) return showToast("Голосовой чат не поддерживается браузером");
         if (!Boolean(gs?.game?.voiceEnabled)) return showToast("Судья отключил голосовой чат");
+        voiceUnlockAudioPlayback();
 
         if (state.voice.micMuted) {
           try {
@@ -936,6 +976,7 @@ async function bootstrap() {
         if (!canUseVoiceInBrowser()) return showToast("Голосовой чат не поддерживается браузером");
 
         voiceSetSpeakerMuted(!state.voice.speakerMuted);
+        voiceUnlockAudioPlayback();
         showToast(state.voice.speakerMuted ? "Динамик выключен" : "Динамик включён");
         updateVoiceUi(gs);
       });
