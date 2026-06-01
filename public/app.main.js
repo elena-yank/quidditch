@@ -46,6 +46,7 @@ let voiceControlsHomeParent = null;
 let voiceControlsHomeNextSibling = null;
 let themeToggleHomeParent = null;
 let themeToggleHomeNextSibling = null;
+let voiceAutoUnlockInstalled = false;
 
 const VOICE_SVG = {
   mic: `
@@ -169,6 +170,21 @@ function voiceUnlockAudioPlayback() {
     a.muted = Boolean(state.voice.speakerMuted);
     a.play?.().catch(() => {});
   }
+}
+
+function voiceInstallAutoUnlock() {
+  if (voiceAutoUnlockInstalled) return;
+  voiceAutoUnlockInstalled = true;
+
+  const unlock = () => {
+    if (state.voice.audioUnlocked) return;
+    voiceUnlockAudioPlayback();
+    document.removeEventListener("pointerdown", unlock);
+    document.removeEventListener("keydown", unlock);
+  };
+
+  document.addEventListener("pointerdown", unlock, { passive: true });
+  document.addEventListener("keydown", unlock);
 }
 
 async function voiceAddIceCandidate(peer, payload) {
@@ -296,7 +312,7 @@ function voiceEnsurePeer(peerId) {
   const audioEl = document.createElement("audio");
   audioEl.autoplay = true;
   audioEl.playsInline = true;
-  audioEl.muted = Boolean(state.voice.speakerMuted);
+  audioEl.muted = Boolean(state.voice.speakerMuted) || !Boolean(state.voice.audioUnlocked);
   audioEl.style.display = "none";
   document.body.appendChild(audioEl);
 
@@ -312,7 +328,7 @@ function voiceEnsurePeer(peerId) {
     const stream = e.streams?.[0] || null;
     if (stream) audioEl.srcObject = stream;
     else audioEl.srcObject = new MediaStream([e.track]);
-    audioEl.muted = Boolean(state.voice.speakerMuted);
+    audioEl.muted = Boolean(state.voice.speakerMuted) || !Boolean(state.voice.audioUnlocked);
     audioEl.play?.().catch(() => {});
   };
   pc.onconnectionstatechange = () => {
@@ -792,6 +808,7 @@ function syncLeaveGameBtnLabel() {
 
 async function bootstrap() {
   try {
+    voiceInstallAutoUnlock();
     initThemeToggle();
     const [health, meta] = await Promise.all([api.health(), api.meta()]);
     if (!health?.ok) showToast("сервер недоступен");
