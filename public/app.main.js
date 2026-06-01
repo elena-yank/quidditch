@@ -43,6 +43,8 @@ function stopRoomPolling() {
 const VOICE_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 let voiceControlsHomeParent = null;
 let voiceControlsHomeNextSibling = null;
+let themeToggleHomeParent = null;
+let themeToggleHomeNextSibling = null;
 
 const VOICE_SVG = {
   mic: `
@@ -106,24 +108,47 @@ function syncVoiceControlsPlacement() {
 
   if (isInRoom && isMobile && statusRow) {
     if (els.voiceControls.parentElement !== statusRow) statusRow.appendChild(els.voiceControls);
-    return;
-  }
-
-  if (isInRoom && !isMobile && titleLeft && els.observersOpenBtn) {
+  } else if (isInRoom && !isMobile && titleLeft && els.observersOpenBtn) {
     if (els.voiceControls.parentElement !== titleLeft) {
       titleLeft.insertBefore(els.voiceControls, els.observersOpenBtn.nextSibling);
     } else {
       const prev = els.voiceControls.previousElementSibling;
       if (prev !== els.observersOpenBtn) titleLeft.insertBefore(els.voiceControls, els.observersOpenBtn.nextSibling);
     }
+  } else {
+    if (els.voiceControls.parentElement !== voiceControlsHomeParent) {
+      if (voiceControlsHomeNextSibling && voiceControlsHomeNextSibling.parentElement === voiceControlsHomeParent) {
+        voiceControlsHomeParent.insertBefore(els.voiceControls, voiceControlsHomeNextSibling);
+      } else {
+        voiceControlsHomeParent.appendChild(els.voiceControls);
+      }
+    }
+  }
+
+  const themeBtn = els.themeToggleBtn || null;
+  if (!themeBtn) return;
+
+  if (!themeToggleHomeParent) {
+    themeToggleHomeParent = themeBtn.parentElement;
+    themeToggleHomeNextSibling = themeBtn.nextSibling;
+  }
+
+  if (isInRoom && isMobile) {
+    if (themeBtn.parentElement !== els.voiceControls) {
+      if (els.voiceMicBtn) els.voiceControls.insertBefore(themeBtn, els.voiceMicBtn);
+      else els.voiceControls.insertBefore(themeBtn, els.voiceControls.firstChild);
+    } else if (els.voiceMicBtn && themeBtn.nextSibling !== els.voiceMicBtn) {
+      els.voiceControls.insertBefore(themeBtn, els.voiceMicBtn);
+    }
     return;
   }
 
-  if (els.voiceControls.parentElement === voiceControlsHomeParent) return;
-  if (voiceControlsHomeNextSibling && voiceControlsHomeNextSibling.parentElement === voiceControlsHomeParent) {
-    voiceControlsHomeParent.insertBefore(els.voiceControls, voiceControlsHomeNextSibling);
-  } else {
-    voiceControlsHomeParent.appendChild(els.voiceControls);
+  if (themeToggleHomeParent && themeBtn.parentElement !== themeToggleHomeParent) {
+    if (themeToggleHomeNextSibling && themeToggleHomeNextSibling.parentElement === themeToggleHomeParent) {
+      themeToggleHomeParent.insertBefore(themeBtn, themeToggleHomeNextSibling);
+    } else {
+      themeToggleHomeParent.appendChild(themeBtn);
+    }
   }
 }
 
@@ -466,6 +491,16 @@ function resetRoomScopedState() {
   state.lastStunnedStepNo = null;
   state.lastMoveTap = null;
   state.resultsDismissed = false;
+  state.chat.scope = "team";
+  state.chat.stickToBottom = true;
+  state.chat.lastRenderedId = null;
+  if (els.chatScopeSelect) {
+    els.chatScopeSelect.disabled = false;
+    els.chatScopeSelect.value = "team";
+  }
+  if (els.chatInput) els.chatInput.value = "";
+  if (els.chatHint) els.chatHint.textContent = "";
+  if (els.chatLog) els.chatLog.innerHTML = "";
   state.draft = { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null };
   renderEventLog();
   voiceStopAll();
@@ -710,6 +745,7 @@ function syncLeaveGameBtnLabel() {
 
 async function bootstrap() {
   try {
+    initThemeToggle();
     const [health, meta] = await Promise.all([api.health(), api.meta()]);
     if (!health?.ok) showToast("сервер недоступен");
     els.endTurnBtn.textContent = "Завершить ход";
@@ -784,6 +820,58 @@ async function bootstrap() {
       clearSession();
       await goHome();
     });
+
+    const syncChatStickToBottomFromScroll = () => {
+      if (!els.chatLog) return;
+      const nearBottom = els.chatLog.scrollHeight - els.chatLog.scrollTop - els.chatLog.clientHeight < 20;
+      state.chat.stickToBottom = nearBottom;
+    };
+
+    async function sendChatMessage() {
+      const myId = state.session?.participantId || null;
+      if (!myId) return;
+      const gs = state.gameState;
+      if (!gs) return;
+
+      const text = String(els.chatInput?.value || "").trim();
+      if (!text) return;
+
+      const scope = els.chatScopeSelect?.value === "all" ? "all" : "team";
+      const res = await api.chatSend(myId, { scope, text });
+      if (!res.ok) {
+        if (res.status === 403 && res.body?.error === "game_finished") showToast("Игра уже завершена");
+        else if (res.status === 400 && res.body?.error === "observer_cannot_team_chat") showToast("Наблюдатели могут писать только всем");
+        else showToast("Не удалось отправить сообщение");
+        return;
+      }
+
+      if (els.chatInput) els.chatInput.value = "";
+      state.chat.stickToBottom = true;
+      await refreshRoomOnce();
+    }
+
+    if (els.chatLog) {
+      els.chatLog.addEventListener("scroll", syncChatStickToBottomFromScroll);
+    }
+    if (els.chatScopeSelect) {
+      els.chatScopeSelect.addEventListener("change", () => {
+        state.chat.scope = els.chatScopeSelect.value === "all" ? "all" : "team";
+        const gs = state.gameState;
+        const myId = state.session?.participantId || null;
+        const me = myId && gs ? (gs.participants || []).find((p) => p.id === myId) || null : null;
+        if (gs) renderChat(gs, me);
+      });
+    }
+    if (els.chatSendBtn) {
+      els.chatSendBtn.addEventListener("click", sendChatMessage);
+    }
+    if (els.chatInput) {
+      els.chatInput.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        sendChatMessage();
+      });
+    }
 
     els.startGameBtn.addEventListener("click", async () => {
       const id = state.session?.participantId || null;

@@ -192,6 +192,58 @@ function renderEventLog() {
   els.eventLog.scrollTop = els.eventLog.scrollHeight;
 }
 
+function formatChatTime(ts) {
+  try {
+    const d = new Date(ts);
+    if (!Number.isFinite(d.getTime())) return "";
+    return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+function chatSenderHtml(msg) {
+  const nick = escapeHtml(msg?.fromNick || "Игрок");
+  const team = String(msg?.fromTeam || "").toLowerCase();
+  const cls = team ? `eventName team-${team}` : "eventName";
+  return `<span class="${cls}">${nick}</span>`;
+}
+
+function renderChat(gameState, me) {
+  if (!els.chatLog || !els.chatScopeSelect || !els.chatHint) return;
+
+  const canTeam = Boolean(me && !me.is_observer);
+  if (!canTeam) {
+    state.chat.scope = "all";
+    els.chatScopeSelect.value = "all";
+    els.chatScopeSelect.disabled = true;
+  } else {
+    els.chatScopeSelect.disabled = false;
+    const nextScope = els.chatScopeSelect.value === "all" ? "all" : "team";
+    state.chat.scope = nextScope;
+  }
+
+  els.chatHint.textContent = state.chat.scope === "team" ? "видит твоя команда" : "видят все игроки";
+
+  const msgs = Array.isArray(gameState?.chat?.messages) ? gameState.chat.messages : [];
+  const lastId = msgs.length > 0 ? String(msgs[msgs.length - 1]?.id || "") : null;
+  if (lastId && lastId === state.chat.lastRenderedId && els.chatLog.childElementCount === msgs.length) return;
+  state.chat.lastRenderedId = lastId;
+
+  els.chatLog.innerHTML = "";
+  for (const msg of msgs) {
+    const line = document.createElement("div");
+    line.className = "chatLine";
+    const t = formatChatTime(msg?.createdAt);
+    const scope = msg?.scope === "team" ? "команде" : "всем";
+    const meta = t ? `<span class="chatMeta">[${escapeHtml(t)} · ${escapeHtml(scope)}]</span> ` : `<span class="chatMeta">[${escapeHtml(scope)}]</span> `;
+    line.innerHTML = `${meta}${chatSenderHtml(msg)}: ${escapeHtml(msg?.text || "")}`;
+    els.chatLog.appendChild(line);
+  }
+
+  if (state.chat.stickToBottom) els.chatLog.scrollTop = els.chatLog.scrollHeight;
+}
+
 function pushEventLog(message) {
   const msg = String(message || "").trim();
   if (!msg) return;
@@ -1945,6 +1997,7 @@ function renderRoom(gameState) {
   renderPieces(gameState);
   updateQuaffleUi(gameState);
   updateStartLockUi(gameState, me);
+  renderChat(gameState, me);
   renderResults(gameState);
   if (gameState.duel && state.session?.participantId) {
     openDuelOverlay(gameState.duel, state.session.participantId);

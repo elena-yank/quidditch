@@ -24,6 +24,11 @@ const state = {
     pollInterval: null,
     localStream: null,
     peers: new Map()
+  },
+  chat: {
+    scope: "team",
+    stickToBottom: true,
+    lastRenderedId: null
   }
 };
 

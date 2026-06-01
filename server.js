@@ -679,6 +679,21 @@ async function initDb() {
     `);
     await client.query(`CREATE INDEX IF NOT EXISTS voice_signals_to_seq_idx ON voice_signals (to_id, seq)`);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        id TEXT PRIMARY KEY,
+        game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        from_id TEXT NOT NULL,
+        from_nickname TEXT NOT NULL,
+        from_team TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        to_team TEXT NULL,
+        text TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS chat_messages_game_created_idx ON chat_messages (game_id, created_at DESC)`);
+
     await client.query("COMMIT");
   } catch (e) {
     await client.query("ROLLBACK");
@@ -3079,6 +3094,11 @@ app.get("/api/games/:code/state", async (req, res) => {
     [game.id]
   );
 
+  const chatRes = await pool.query(
+    "SELECT id, from_id, from_nickname, from_team, scope, to_team, text, created_at FROM chat_messages WHERE game_id = $1 ORDER BY created_at DESC, id DESC LIMIT 80",
+    [game.id]
+  );
+
   const taken = {};
   for (const p of participantsRes.rows) {
     if (p.is_observer) continue;
@@ -3095,6 +3115,26 @@ app.get("/api/games/:code/state", async (req, res) => {
   if (viewerId && !byId.has(viewerId)) return res.status(403).json({ error: "kicked" });
   const viewer = viewerId ? byId.get(viewerId) : null;
   const revealPlansToViewer = Boolean(viewer && !viewer.is_observer);
+  const viewerTeamForChat = viewer && !viewer.is_observer ? viewer.team : null;
+  const chatMessages = (chatRes.rows || [])
+    .slice()
+    .reverse()
+    .filter((r) => {
+      const scope = String(r.scope || "").toLowerCase();
+      if (scope === "all") return true;
+      if (scope === "team") return Boolean(viewerTeamForChat) && String(r.to_team || "") === String(viewerTeamForChat);
+      return false;
+    })
+    .map((r) => ({
+      id: r.id,
+      fromId: r.from_id,
+      fromNick: r.from_nickname,
+      fromTeam: r.from_team,
+      scope: r.scope,
+      toTeam: r.to_team,
+      text: r.text,
+      createdAt: r.created_at
+    }));
 
   const stepNo = Number(game.step_no || 1);
   const client = await pool.connect();
@@ -3202,6 +3242,9 @@ app.get("/api/games/:code/state", async (req, res) => {
         createdAt: r.created_at
       }))
       .reverse(),
+    chat: {
+      messages: chatMessages
+    },
     duel: duel
       ? {
           id: duel.id,
@@ -3320,6 +3363,73 @@ app.post("/api/participants/:id/voice/send", async (req, res) => {
   );
 
   res.json({ ok: true, seq: Number(insertRes.rows[0]?.seq || 0) });
+});
+
+app.post("/api/participants/:id/chat", async (req, res) => {
+  const fromId = String(req.params.id || "").trim();
+  if (!fromId) return res.status(400).json({ error: "invalid_participant" });
+
+  const scopeRaw = String(req.body?.scope || "").trim().toLowerCase();
+  const scope = scopeRaw === "all" ? "all" : scopeRaw === "team" ? "team" : null;
+  if (!scope) return res.status(400).json({ error: "invalid_scope" });
+
+  const text = typeof req.body?.text === "string" ? req.body.text.trim().slice(0, 280) : "";
+  if (!text) return res.status(400).json({ error: "empty_text" });
+
+  const fromRes = await pool.query(
+    `
+      SELECT p.id, p.game_id, p.nickname, p.team, p.is_observer, g.finished
+      FROM participants p
+      JOIN games g ON g.id = p.game_id
+      WHERE p.id = $1
+    `,
+    [fromId]
+  );
+  const from = fromRes.rows[0] || null;
+  if (!from) return res.status(404).json({ error: "not_found" });
+  if (Boolean(from.finished)) return res.status(403).json({ error: "game_finished" });
+  if (scope === "team" && Boolean(from.is_observer)) return res.status(400).json({ error: "observer_cannot_team_chat" });
+
+  const id = nanoidId();
+  const toTeam = scope === "team" ? from.team : null;
+
+  try {
+    await pool.query(
+      "INSERT INTO chat_messages (id, game_id, from_id, from_nickname, from_team, scope, to_team, text) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+      [id, from.game_id, fromId, from.nickname, from.team, scope, toTeam, text]
+    );
+  } catch {
+    return res.status(500).json({ error: "db_error" });
+  }
+
+  try {
+    await pool.query(
+      `
+        DELETE FROM chat_messages
+        WHERE game_id = $1 AND id NOT IN (
+          SELECT id
+          FROM chat_messages
+          WHERE game_id = $1
+          ORDER BY created_at DESC, id DESC
+          LIMIT 200
+        )
+      `,
+      [from.game_id]
+    );
+  } catch {}
+
+  res.json({
+    ok: true,
+    message: {
+      id,
+      scope,
+      toTeam,
+      fromId,
+      fromNick: from.nickname,
+      fromTeam: from.team,
+      text
+    }
+  });
 });
 
 app.post("/api/judge/:judgeId/voice", async (req, res) => {

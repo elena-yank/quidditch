@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #0c1310;
   --panel: #101c16;
   --border: #233327;
@@ -14,6 +15,43 @@
   --btn-hover: #243a2b;
   --btn-disabled: #1a241f;
   --disabled: #6f8273;
+  --bg-rgb: 12, 19, 16;
+  --panel-rgb: 16, 28, 22;
+  --hover: rgba(0, 0, 0, 0.18);
+  --shade-1: rgba(0, 0, 0, 0.12);
+  --shade-2: rgba(0, 0, 0, 0.18);
+  --shade-3: rgba(0, 0, 0, 0.25);
+  --shade-4: rgba(0, 0, 0, 0.32);
+  --shade-5: rgba(0, 0, 0, 0.55);
+  --table-border: rgba(255, 255, 255, 0.08);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eef1ef;
+  --panel: #ffffff;
+  --border: #cfd9d1;
+  --text: #0b1410;
+  --muted: #4c5b50;
+  --accent: #1f7a3c;
+  --danger: #cc3d3d;
+  --teamA: 31, 122, 60;
+  --teamB: 204, 61, 61;
+  --cell-a: #cfead5;
+  --cell-b: #bfe3c9;
+  --btn: #f3f6f4;
+  --btn-hover: #e7efe9;
+  --btn-disabled: #eef2ef;
+  --disabled: #8d9a91;
+  --bg-rgb: 238, 241, 239;
+  --panel-rgb: 255, 255, 255;
+  --hover: rgba(0, 0, 0, 0.06);
+  --shade-1: rgba(0, 0, 0, 0.05);
+  --shade-2: rgba(0, 0, 0, 0.08);
+  --shade-3: rgba(0, 0, 0, 0.12);
+  --shade-4: rgba(0, 0, 0, 0.16);
+  --shade-5: rgba(0, 0, 0, 0.30);
+  --table-border: rgba(0, 0, 0, 0.08);
 }
 
 html {
@@ -28,14 +66,14 @@ body {
   margin: 0;
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
   background:
-    linear-gradient(rgba(12, 19, 16, 0.72), rgba(12, 19, 16, 0.72)),
+    linear-gradient(rgba(var(--bg-rgb), 0.72), rgba(var(--bg-rgb), 0.72)),
     url("/src/bg.jpeg") center / cover no-repeat fixed;
   color: var(--text);
 }
 
 body.inRoom {
   background:
-    linear-gradient(rgba(12, 19, 16, 0.72), rgba(12, 19, 16, 0.72)),
+    linear-gradient(rgba(var(--bg-rgb), 0.72), rgba(var(--bg-rgb), 0.72)),
     url("/src/spectating.png") center / cover no-repeat fixed;
 }
 
@@ -67,6 +105,7 @@ header {
   justify-content: space-between;
   gap: 12px;
   padding-bottom: 18px;
+  position: relative;
 }
 
 body:not(.inRoom) header {
@@ -84,7 +123,11 @@ body:not(.inRoom) header {
 }
 
 body:not(.inRoom) .headerRight {
-  display: none;
+  display: flex;
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  right: calc(env(safe-area-inset-right, 0px) + 12px);
+  z-index: 100;
 }
 
 #roomCodePill,
@@ -194,7 +237,7 @@ body:not(.inRoom) #homeView {
 }
 
 body:not(.inRoom) #homeView .card {
-  background: rgba(16, 28, 22, 0.85);
+  background: rgba(var(--panel-rgb), 0.85);
   width: 100%;
   max-width: none;
 }
@@ -213,7 +256,7 @@ body:not(.inRoom) #homeView .card {
 
 .tabBtn {
   padding: 8px 10px;
-  background: rgba(16, 28, 22, 0.92);
+  background: rgba(var(--panel-rgb), 0.92);
 }
 
 .tabBtn.active {
@@ -228,7 +271,7 @@ body:not(.inRoom) #homeView .card {
 
 .formBlock {
   padding: 10px 0;
-  border-top: 1px solid rgba(35, 51, 39, 0.7);
+  border-top: 1px solid var(--border);
 }
 
 .formBlock:first-child {
@@ -291,7 +334,7 @@ label {
 
 input,
 select {
-  background: rgba(16, 28, 22, 0.95);
+  background: rgba(var(--panel-rgb), 0.95);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -345,7 +388,7 @@ button:disabled {
   border-radius: 999px;
   padding: 6px 10px;
   color: var(--muted);
-  background: rgba(16, 28, 22, 0.92);
+  background: rgba(var(--panel-rgb), 0.92);
 }
 
 .pillBtn {
@@ -372,7 +415,7 @@ button:disabled {
 }
 
 .pillBtn:hover {
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--hover);
 }
 
 .hidden {
@@ -467,7 +510,7 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 10px 10px;
-  background: rgba(0, 0, 0, 0.12);
+  background: var(--shade-1);
 }
 
 .roleButtons {
@@ -503,12 +546,12 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--shade-5);
   z-index: 5;
 }
 
 .startOverlayCard {
-  background: rgba(16, 28, 22, 0.92);
+  background: rgba(var(--panel-rgb), 0.92);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 14px 16px;
@@ -548,7 +591,7 @@ button.primary {
 
 .sidePanel button.sent:disabled {
   background: rgba(126, 208, 141, 0.08);
-  color: rgba(231, 241, 234, 0.85);
+  color: var(--text);
 }
 
 .fieldLayout {
@@ -597,8 +640,8 @@ button.primary {
   border-radius: 12px;
   font-size: 13px;
   line-height: 1.3;
-  color: rgba(231, 241, 234, 0.8);
-  background: rgba(0, 0, 0, 0.25);
+  color: var(--muted);
+  background: var(--shade-3);
   border: 1px solid rgba(231, 241, 234, 0.15);
   text-align: center;
 }
@@ -624,7 +667,7 @@ button.primary {
 .eventLog {
   height: 100%;
   overflow: auto;
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--shade-4);
   border: 2px solid rgba(52, 156, 255, 0.75);
   border-radius: 12px;
   padding: 10px;
@@ -645,10 +688,85 @@ button.primary {
   top: -18px;
 }
 
+.roomChatWrap {
+  margin-top: 14px;
+  border: 2px solid rgba(52, 156, 255, 0.55);
+  border-radius: 12px;
+  padding: 10px;
+  background: var(--shade-4);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 10px;
+  height: clamp(180px, 30vh, 360px);
+}
+
+.chatHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.chatTitle {
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.2px;
+}
+
+.chatHint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chatLog {
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.chatLine {
+  font-size: 12px;
+  line-height: 1.25;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.chatMeta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chatInputRow {
+  display: grid;
+  grid-template-columns: 140px 1fr 120px;
+  gap: 8px;
+  align-items: center;
+}
+
+.chatInputRow select,
+.chatInputRow input {
+  width: 100%;
+  height: 36px;
+  background: rgba(var(--panel-rgb), 0.92);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  padding: 0 10px;
+  outline: none;
+}
+
+.chatInputRow button {
+  width: 100%;
+  height: 36px;
+  justify-content: center;
+}
+
 .eventLine {
   font-size: 11px;
   line-height: 1.25;
-  color: rgba(231, 241, 234, 0.95);
+  color: var(--text);
 }
 
 .eventName {
@@ -702,6 +820,10 @@ button.primary {
 
   .eventLog {
     height: 220px;
+  }
+
+  .roomChatWrap {
+    display: none;
   }
 
   .sideStatusRow {
@@ -1237,7 +1359,7 @@ button.primary {
   bottom: 18px;
   left: 50%;
   transform: translateX(-50%);
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--shade-5);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 10px 14px;
@@ -1254,7 +1376,7 @@ button.primary {
 .overlay {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--shade-5);
   display: grid;
   place-items: center;
   z-index: 10;
@@ -1263,7 +1385,7 @@ button.primary {
 
 .overlayCard {
   width: min(340px, calc(100% - 24px));
-  background: rgba(16, 28, 22, 0.92);
+  background: rgba(var(--panel-rgb), 0.92);
   border: 1px solid rgba(0, 0, 0, 0.25);
   border-radius: 12px;
   padding: 12px;
@@ -1288,7 +1410,7 @@ button.primary {
 .bar {
   height: 18px;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--shade-3);
   border: 1px solid var(--border);
   overflow: hidden;
   cursor: pointer;
@@ -1329,7 +1451,7 @@ button.primary {
   margin-top: 10px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.12);
+  background: var(--shade-1);
   overflow: auto;
   max-height: min(60vh, 560px);
 }
@@ -1343,7 +1465,7 @@ button.primary {
 .resultsTable th,
 .resultsTable td {
   padding: 8px 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--table-border);
   text-align: left;
   vertical-align: top;
   white-space: nowrap;
@@ -1352,13 +1474,13 @@ button.primary {
 .resultsTable th {
   position: sticky;
   top: 0;
-  background: rgba(16, 28, 22, 0.95);
+  background: rgba(var(--panel-rgb), 0.95);
   z-index: 1;
   font-weight: 700;
 }
 
 .resultsTeamRow td {
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--shade-2);
   font-weight: 700;
 }
 
@@ -1397,7 +1519,7 @@ button.primary {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 10px;
-  background: rgba(0, 0, 0, 0.12);
+  background: var(--shade-1);
 }
 
 .teamHead {
@@ -1430,7 +1552,7 @@ button.primary {
   border: 1px solid rgba(0, 0, 0, 0.22);
   border-radius: 10px;
   padding: 8px 10px;
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--shade-2);
 }
 
 .turnDot {

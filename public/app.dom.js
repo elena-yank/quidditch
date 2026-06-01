@@ -5,6 +5,7 @@ const els = {
   pageLogo: $("pageLogo"),
   pageTitleText: $("pageTitleText"),
   pageSubtitle: $("pageSubtitle"),
+  themeToggleBtn: $("themeToggleBtn"),
   roomCodePill: $("roomCodePill"),
   homeView: $("homeView"),
   roomView: $("roomView"),
@@ -42,6 +43,12 @@ const els = {
   sideTopArea: $("sideTopArea"),
   eventsStack: $("eventsStack"),
   eventLog: $("eventLog"),
+  roomChatWrap: $("roomChatWrap"),
+  chatHint: $("chatHint"),
+  chatLog: $("chatLog"),
+  chatScopeSelect: $("chatScopeSelect"),
+  chatInput: $("chatInput"),
+  chatSendBtn: $("chatSendBtn"),
   pickupQuaffleBtn: $("pickupQuaffleBtn"),
   stealQuaffleBtn: $("stealQuaffleBtn"),
   stealLockedMessage: $("stealLockedMessage"),
@@ -90,6 +97,86 @@ const els = {
   watchNick: $("watchNick"),
   watchBtn: $("watchBtn"),
 };
+
+const THEME_KEY = "kwidditch_theme";
+const THEMES = { dark: "dark", light: "light" };
+const THEME_SVG = {
+  sun: `
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"></circle>
+      <path d="M12 2v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M12 20v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M4.93 4.93l1.41 1.41" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M17.66 17.66l1.41 1.41" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M2 12h2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M20 12h2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M4.93 19.07l1.41-1.41" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <path d="M17.66 6.34l1.41-1.41" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+    </svg>
+  `,
+  moon: `
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M21 12.8A8 8 0 0 1 11.2 3a6.5 6.5 0 1 0 9.8 9.8z"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      ></path>
+    </svg>
+  `
+};
+
+function normalizeTheme(value) {
+  const v = String(value || "").trim().toLowerCase();
+  if (v === THEMES.light) return THEMES.light;
+  if (v === THEMES.dark) return THEMES.dark;
+  return null;
+}
+
+function getCurrentTheme() {
+  const attr = normalizeTheme(document.documentElement?.dataset?.theme);
+  return attr || THEMES.dark;
+}
+
+function setTheme(nextTheme) {
+  const next = normalizeTheme(nextTheme) || THEMES.dark;
+  document.documentElement.dataset.theme = next;
+  try {
+    localStorage.setItem(THEME_KEY, next);
+  } catch {}
+  syncThemeToggleBtn();
+}
+
+function syncThemeToggleBtn() {
+  const btn = els.themeToggleBtn;
+  if (!btn) return;
+  const current = getCurrentTheme();
+  const next = current === THEMES.light ? THEMES.dark : THEMES.light;
+  btn.innerHTML = next === THEMES.light ? THEME_SVG.sun : THEME_SVG.moon;
+  btn.title = next === THEMES.light ? "Светлая тема" : "Тёмная тема";
+  btn.setAttribute("aria-label", next === THEMES.light ? "Переключить на светлую тему" : "Переключить на тёмную тему");
+  btn.setAttribute("aria-pressed", current === THEMES.dark ? "true" : "false");
+}
+
+function initThemeToggle() {
+  const btn = els.themeToggleBtn;
+  if (!btn) return;
+  try {
+    const stored = normalizeTheme(localStorage.getItem(THEME_KEY));
+    if (stored) document.documentElement.dataset.theme = stored;
+    else if (!normalizeTheme(document.documentElement?.dataset?.theme)) document.documentElement.dataset.theme = THEMES.dark;
+  } catch {
+    if (!normalizeTheme(document.documentElement?.dataset?.theme)) document.documentElement.dataset.theme = THEMES.dark;
+  }
+
+  syncThemeToggleBtn();
+  btn.addEventListener("click", () => {
+    const current = getCurrentTheme();
+    setTheme(current === THEMES.light ? THEMES.dark : THEMES.light);
+  });
+}
 
 function showToast(message) {
   els.toast.textContent = message;

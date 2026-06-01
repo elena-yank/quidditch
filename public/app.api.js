@@ -44,6 +44,12 @@ const api = {
       method: "DELETE",
       headers: { "Content-Type": "application/json" }
     }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() })),
+  chatSend: (id, payload) =>
+    fetch(`/api/participants/${encodeURIComponent(id)}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {})
+    }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() })),
   startGame: (id) =>
     fetch(`/api/participants/${encodeURIComponent(id)}/game/start`, {
       method: "POST",

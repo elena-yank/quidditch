@@ -19,6 +19,18 @@
           <div class="small" id="pageSubtitle"></div>
         </div>
         <div class="headerRight">
+          <button class="pillBtn iconOnly" id="themeToggleBtn" title="Переключить тему" type="button" aria-label="Переключить тему">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M21 12.8A8 8 0 0 1 11.2 3a6.5 6.5 0 1 0 9.8 9.8z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              ></path>
+            </svg>
+          </button>
           <div class="pill roomCodePill" id="roomCodePill">
             <strong id="roomCodeLabel"></strong>
             <button class="pillBtn iconOnly" id="copyRoomBtn" title="Скопировать код комнаты" type="button" aria-label="Скопировать код комнаты">
@@ -256,6 +268,22 @@
                 <div class="eventTitle">События</div>
                 <div class="eventLog" id="eventLog"></div>
               </div>
+            </div>
+          </div>
+
+          <div class="roomChatWrap" id="roomChatWrap">
+            <div class="chatHeader">
+              <div class="chatTitle">Чат</div>
+              <div class="chatHint" id="chatHint"></div>
+            </div>
+            <div class="chatLog" id="chatLog"></div>
+            <div class="chatInputRow">
+              <select id="chatScopeSelect" aria-label="Кому писать">
+                <option value="team">команде</option>
+                <option value="all">всем</option>
+              </select>
+              <input id="chatInput" type="text" autocomplete="off" maxlength="280" placeholder="Написать сообщение…" />
+              <button id="chatSendBtn" type="button">Отправить</button>
             </div>
           </div>
         </div>
