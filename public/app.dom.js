@@ -32,6 +32,7 @@ const els = {
   pitch: $("pitch"),
   startOverlay: $("startOverlay"),
   stepStatus: $("stepStatus"),
+  turnTimerStatus: $("turnTimerStatus"),
   exportLogsBtn: $("exportLogsBtn"),
   snitchStatus: $("snitchStatus"),
   scoreStatus: $("scoreStatus"),
@@ -44,9 +45,11 @@ const els = {
   eventsStack: $("eventsStack"),
   eventLog: $("eventLog"),
   roomChatWrap: $("roomChatWrap"),
+  chatTabAllBtn: $("chatTabAllBtn"),
+  chatTabTeamBtn: $("chatTabTeamBtn"),
+  chatToggleBtn: $("chatToggleBtn"),
   chatHint: $("chatHint"),
   chatLog: $("chatLog"),
-  chatScopeSelect: $("chatScopeSelect"),
   chatInput: $("chatInput"),
   chatSendBtn: $("chatSendBtn"),
   pickupQuaffleBtn: $("pickupQuaffleBtn"),
@@ -298,10 +301,17 @@ function setView(view) {
     els.homeView.classList.add("hidden");
     els.roomView.classList.remove("hidden");
     document.body.classList.add("inRoom");
+    const wrap = els.board?.closest?.(".boardWrap");
+    if (wrap && els.toast && els.toast.parentElement !== wrap) {
+      wrap.appendChild(els.toast);
+    }
   } else {
     els.roomView.classList.add("hidden");
     els.homeView.classList.remove("hidden");
     document.body.classList.remove("inRoom");
+    if (els.toast && els.toast.parentElement !== document.body) {
+      document.body.appendChild(els.toast);
+    }
   }
 }
 

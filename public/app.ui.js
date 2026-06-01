@@ -210,33 +210,101 @@ function chatSenderHtml(msg) {
 }
 
 function renderChat(gameState, me) {
-  if (!els.chatLog || !els.chatScopeSelect || !els.chatHint) return;
+  if (
+    !els.roomChatWrap ||
+    !els.chatLog ||
+    !els.chatHint ||
+    !els.chatTabAllBtn ||
+    !els.chatTabTeamBtn ||
+    !els.chatToggleBtn ||
+    !els.chatInput ||
+    !els.chatSendBtn
+  )
+    return;
+
+  const enabled = Boolean(state.chat.enabled);
+  els.chatToggleBtn.textContent = enabled ? "Выключить" : "Включить";
+  els.chatToggleBtn.setAttribute("aria-pressed", enabled ? "false" : "true");
+  els.roomChatWrap.classList.toggle("chatDisabled", !enabled);
 
   const canTeam = Boolean(me && !me.is_observer);
-  if (!canTeam) {
-    state.chat.scope = "all";
-    els.chatScopeSelect.value = "all";
-    els.chatScopeSelect.disabled = true;
-  } else {
-    els.chatScopeSelect.disabled = false;
-    const nextScope = els.chatScopeSelect.value === "all" ? "all" : "team";
-    state.chat.scope = nextScope;
+  const scope = canTeam && state.chat.scope === "team" ? "team" : "all";
+  state.chat.scope = scope;
+
+  els.chatTabAllBtn.setAttribute("aria-selected", scope === "all" ? "true" : "false");
+  els.chatTabTeamBtn.setAttribute("aria-selected", scope === "team" ? "true" : "false");
+
+  if (!enabled) {
+    els.chatTabAllBtn.disabled = true;
+    els.chatTabTeamBtn.disabled = true;
+    els.chatInput.disabled = true;
+    els.chatSendBtn.disabled = true;
+    els.chatHint.textContent = "чат выключен";
+    return;
   }
 
-  els.chatHint.textContent = state.chat.scope === "team" ? "видит твоя команда" : "видят все игроки";
+  els.chatTabAllBtn.disabled = false;
+  els.chatTabTeamBtn.disabled = !canTeam;
+  els.chatInput.disabled = false;
+  els.chatSendBtn.disabled = false;
 
-  const msgs = Array.isArray(gameState?.chat?.messages) ? gameState.chat.messages : [];
+  els.chatHint.textContent = scope === "team" ? "показывает: чат команды" : "показывает: все сообщения";
+
+  const allowFromServerMs = Number(state.chat.allowFromServerMs || 0);
+  if (!Array.isArray(state.chat.history)) state.chat.history = [];
+  if (!(state.chat.historyIds instanceof Set)) state.chat.historyIds = new Set();
+
+  const incoming = Array.isArray(gameState?.chat?.messages) ? gameState.chat.messages : [];
+  for (const msg of incoming) {
+    const id = String(msg?.id || "");
+    if (!id) continue;
+    if (state.chat.historyIds.has(id)) continue;
+
+    const createdAtRaw = msg?.createdAt ?? null;
+    const createdAtMs =
+      typeof createdAtRaw === "number" && Number.isFinite(createdAtRaw)
+        ? createdAtRaw
+        : typeof createdAtRaw === "string"
+          ? Date.parse(createdAtRaw)
+          : NaN;
+
+    if (allowFromServerMs > 0 && Number.isFinite(createdAtMs) && createdAtMs <= allowFromServerMs) continue;
+    if (allowFromServerMs > 0 && !Number.isFinite(createdAtMs)) continue;
+
+    state.chat.historyIds.add(id);
+    state.chat.history.push(msg);
+  }
+
+  while (state.chat.history.length > 200) {
+    const removed = state.chat.history.shift();
+    const id = String(removed?.id || "");
+    if (id) state.chat.historyIds.delete(id);
+  }
+
+  const msgs = scope === "team"
+    ? state.chat.history.filter((m) => String(m?.scope || "").toLowerCase() === "team")
+    : state.chat.history;
+
   const lastId = msgs.length > 0 ? String(msgs[msgs.length - 1]?.id || "") : null;
-  if (lastId && lastId === state.chat.lastRenderedId && els.chatLog.childElementCount === msgs.length) return;
+  if (
+    lastId &&
+    lastId === state.chat.lastRenderedId &&
+    state.chat.lastRenderedScope === scope &&
+    els.chatLog.childElementCount === msgs.length
+  )
+    return;
   state.chat.lastRenderedId = lastId;
+  state.chat.lastRenderedScope = scope;
 
   els.chatLog.innerHTML = "";
   for (const msg of msgs) {
     const line = document.createElement("div");
     line.className = "chatLine";
     const t = formatChatTime(msg?.createdAt);
-    const scope = msg?.scope === "team" ? "команде" : "всем";
-    const meta = t ? `<span class="chatMeta">[${escapeHtml(t)} · ${escapeHtml(scope)}]</span> ` : `<span class="chatMeta">[${escapeHtml(scope)}]</span> `;
+    const msgScope = msg?.scope === "team" ? "команде" : "всем";
+    const meta = t
+      ? `<span class="chatMeta">[${escapeHtml(t)} · ${escapeHtml(msgScope)}]</span> `
+      : `<span class="chatMeta">[${escapeHtml(msgScope)}]</span> `;
     line.innerHTML = `${meta}${chatSenderHtml(msg)}: ${escapeHtml(msg?.text || "")}`;
     els.chatLog.appendChild(line);
   }
@@ -256,17 +324,73 @@ function replaceAllPlain(s, needle, replacement) {
   return String(s || "").split(String(needle || "")).join(String(replacement || ""));
 }
 
-function freeQuafflePickupMessage(p) {
+const MESSAGE_ORDER_CACHE = new Map();
+
+function fnv1a32(input) {
+  let h = 0x811c9dc5;
+  const s = String(input ?? "");
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(seed) {
+  let a = (seed >>> 0) || 1;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function orderForMessagePool(poolKey, len, cycle, seedBase) {
+  const key = `${String(seedBase || "")}|${String(poolKey || "")}|${len}|${cycle}`;
+  const cached = MESSAGE_ORDER_CACHE.get(key);
+  if (cached && Array.isArray(cached) && cached.length === len) return cached;
+
+  const seed = fnv1a32(key);
+  const rnd = mulberry32(seed);
+  const order = Array.from({ length: len }, (_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    const tmp = order[i];
+    order[i] = order[j];
+    order[j] = tmp;
+  }
+  MESSAGE_ORDER_CACHE.set(key, order);
+  return order;
+}
+
+function pickMessageByOccurrence(poolKey, source, fallback, occurrenceNo) {
+  const arr = Array.isArray(source) ? source : [];
+  const len = arr.length;
+  if (len <= 0) return fallback;
+
+  const n = Number(occurrenceNo);
+  const idx0 = Number.isFinite(n) && n > 0 ? Math.floor(n) - 1 : 0;
+  const cycle = Math.floor(idx0 / len);
+  const pos = ((idx0 % len) + len) % len;
+  const seedBase = String(state.roomCode || "");
+  const order = orderForMessagePool(poolKey, len, cycle, seedBase);
+  const idx = order[pos] ?? 0;
+  return arr[idx] ?? fallback;
+}
+
+function freeQuafflePickupMessage(p, occurrenceNo) {
   const arr = Array.isArray(MESSAGES.FREE_QUAFFLE_PICKUP_MESSAGES) ? MESSAGES.FREE_QUAFFLE_PICKUP_MESSAGES : [];
-  const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "[Имя игрока] подбирает квоффл!";
+  const tpl = pickMessageByOccurrence("free_quaffle_pickup", arr, "[Имя игрока] подбирает квоффл!", occurrenceNo);
   const name = participantNameHtml(p);
   const team = teamLabel(p?.team);
   return replaceAllPlain(replaceAllPlain(tpl, "[Имя игрока]", name), "[Название команды игрока]", team);
 }
 
-function quafflePassMessage(passer, receiver) {
+function quafflePassMessage(passer, receiver, occurrenceNo) {
   const arr = Array.isArray(MESSAGES.QUAFFLE_PASS_MESSAGES) ? MESSAGES.QUAFFLE_PASS_MESSAGES : [];
-  const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "[Имя игрока делающего пас] отдаёт пас!";
+  const tpl = pickMessageByOccurrence("quaffle_pass", arr, "[Имя игрока делающего пас] отдаёт пас!", occurrenceNo);
   const passerName = participantNameHtml(passer);
   const receiverName = participantNameHtml(receiver);
   let out = tpl;
@@ -276,9 +400,9 @@ function quafflePassMessage(passer, receiver) {
   return out;
 }
 
-function quaffleStealMessage(taker) {
+function quaffleStealMessage(taker, occurrenceNo) {
   const arr = Array.isArray(MESSAGES.QUAFFLE_STEAL_MESSAGES) ? MESSAGES.QUAFFLE_STEAL_MESSAGES : [];
-  const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "[Имя игрока] выхватывает квоффл!";
+  const tpl = pickMessageByOccurrence("quaffle_steal", arr, "[Имя игрока] выхватывает квоффл!", occurrenceNo);
   const name = participantNameHtml(taker);
   let out = tpl;
   out = replaceAllPlain(out, "[Имя игрока]", name);
@@ -286,35 +410,35 @@ function quaffleStealMessage(taker) {
   return out;
 }
 
-function bludgerHitMessage(p) {
+function bludgerHitMessage(p, occurrenceNo) {
   const arr = Array.isArray(MESSAGES.BLUDGER_HIT_MESSAGES) ? MESSAGES.BLUDGER_HIT_MESSAGES : [];
-  const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "[Имя игрока] бьёт по бладжеру!";
+  const tpl = pickMessageByOccurrence("bludger_hit", arr, "[Имя игрока] бьёт по бладжеру!", occurrenceNo);
   const name = participantNameHtml(p);
   return replaceAllPlain(tpl, "[Имя игрока]", name);
 }
 
-function bludgerStunMessage(p) {
+function bludgerStunMessage(p, occurrenceNo) {
   const arr = Array.isArray(MESSAGES.BLUDGER_STUN_MESSAGES) ? MESSAGES.BLUDGER_STUN_MESSAGES : [];
-  const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "[Имя игрока] оглушён бладжером!";
+  const tpl = pickMessageByOccurrence("bludger_stun", arr, "[Имя игрока] оглушён бладжером!", occurrenceNo);
   const name = participantNameHtml(p);
   return replaceAllPlain(tpl, "[Имя игрока]", name);
 }
 
-function snitchRevealMessage() {
+function snitchRevealMessage(occurrenceNo) {
   const arr = Array.isArray(MESSAGES.SNITCH_REVEAL_MESSAGES) ? MESSAGES.SNITCH_REVEAL_MESSAGES : [];
-  const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "Снитч обнаружен!";
+  const tpl = pickMessageByOccurrence("snitch_reveal", arr, "Снитч обнаружен!", occurrenceNo);
   return String(tpl || "").trim() || "Снитч обнаружен!";
 }
 
-function snitchHideMessage() {
+function snitchHideMessage(occurrenceNo) {
   const arr = Array.isArray(MESSAGES.SNITCH_HIDE_MESSAGES) ? MESSAGES.SNITCH_HIDE_MESSAGES : [];
-  const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "Снитч снова скрылся!";
+  const tpl = pickMessageByOccurrence("snitch_hide", arr, "Снитч снова скрылся!", occurrenceNo);
   return String(tpl || "").trim() || "Снитч снова скрылся!";
 }
 
-function goalScoredMessage(keeper) {
+function goalScoredMessage(keeper, occurrenceNo) {
   const arr = Array.isArray(MESSAGES.GOAL_SCORED_MESSAGES) ? MESSAGES.GOAL_SCORED_MESSAGES : [];
-  const tpl = arr.length ? arr[Math.floor(Math.random() * arr.length)] : "Гол! [Имя игрока] не успевает!";
+  const tpl = pickMessageByOccurrence("goal_scored", arr, "Гол! [Имя игрока] не успевает!", occurrenceNo);
   const name = participantNameHtml(keeper);
   return replaceAllPlain(tpl, "[Имя игрока]", name);
 }
@@ -323,52 +447,74 @@ function captureServerEvents(prevState, nextState) {
   const nextEvents = Array.isArray(nextState?.events) ? nextState.events : [];
   if (nextEvents.length === 0) return;
 
+  const newEvents = [];
   for (const ev of nextEvents) {
     const id = ev?.id || null;
     if (!id) continue;
     if (state.seenEventIds.has(id)) continue;
     state.seenEventIds.add(id);
+    newEvents.push(ev);
+  }
+  if (newEvents.length === 0) return;
 
+  const counters = nextState?.messageCounters || {};
+  const keyByKind = { hit_bludger: "bludger_hit", stun_bludger: "bludger_stun", goal: "goal_scored" };
+  const batchCounts = {};
+  for (const ev of newEvents) {
     const kind = String(ev?.kind || "").toLowerCase();
-    if (kind === "hit_bludger") {
-      const actorId = ev?.actorId || null;
-      const actor = (nextState.participants || []).find((p) => p.id === actorId) || (prevState?.participants || []).find((p) => p.id === actorId) || null;
-      if (actor) pushEventLog(bludgerHitMessage(actor));
-    }
-    if (kind === "stun_bludger") {
-      const actorId = ev?.actorId || null;
-      const actor = (nextState.participants || []).find((p) => p.id === actorId) || (prevState?.participants || []).find((p) => p.id === actorId) || null;
-      if (actor) pushEventLog(bludgerStunMessage(actor));
-    }
-    if (kind === "goal") {
-      const actorId = ev?.actorId || null;
-      const actor = (nextState.participants || []).find((p) => p.id === actorId) || (prevState?.participants || []).find((p) => p.id === actorId) || null;
-      if (actor) pushEventLog(goalScoredMessage(actor));
-    }
+    const k = keyByKind[kind] || null;
+    if (!k) continue;
+    batchCounts[k] = (batchCounts[k] || 0) + 1;
+  }
+
+  const startNo = {};
+  for (const k of Object.keys(batchCounts)) {
+    const newCount = Number(batchCounts[k] || 0);
+    const total = Math.max(newCount, Number(counters?.[k] || 0));
+    startNo[k] = Math.max(1, total - newCount + 1);
+  }
+
+  const used = {};
+  for (const ev of newEvents) {
+    const kind = String(ev?.kind || "").toLowerCase();
+    const key = keyByKind[kind] || null;
+    const actorId = ev?.actorId || null;
+    const actor =
+      (nextState.participants || []).find((p) => p.id === actorId) || (prevState?.participants || []).find((p) => p.id === actorId) || null;
+
+    if (!key || !actor) continue;
+    const n = (used[key] || 0) + 1;
+    used[key] = n;
+    const occurrenceNo = (startNo[key] || 1) + n - 1;
+
+    if (kind === "hit_bludger") pushEventLog(bludgerHitMessage(actor, occurrenceNo));
+    if (kind === "stun_bludger") pushEventLog(bludgerStunMessage(actor, occurrenceNo));
+    if (kind === "goal") pushEventLog(goalScoredMessage(actor, occurrenceNo));
   }
 }
 
 function captureGameEvents(prevState, nextState) {
   if (!prevState || !nextState) return;
+  const counters = nextState?.messageCounters || {};
 
   if (!prevState?.snitch?.revealed && nextState?.snitch?.revealed) {
-    pushEventLog(snitchRevealMessage());
+    pushEventLog(snitchRevealMessage(counters.snitch_reveal));
   }
   if (prevState?.snitch?.revealed && !nextState?.snitch?.revealed && !nextState?.snitch?.caughtById) {
-    pushEventLog(snitchHideMessage());
+    pushEventLog(snitchHideMessage(counters.snitch_hide));
   }
 
   const prevHolder = prevState.quaffle?.holderId || null;
   const nextHolder = nextState.quaffle?.holderId || null;
   if (!prevHolder && nextHolder) {
     const picker = (nextState.participants || []).find((p) => p.id === nextHolder) || null;
-    if (picker) pushEventLog(freeQuafflePickupMessage(picker));
+    if (picker) pushEventLog(freeQuafflePickupMessage(picker, counters.free_quaffle_pickup));
   }
   if (prevHolder && nextHolder && prevHolder !== nextHolder) {
     const passer = (nextState.participants || []).find((p) => p.id === prevHolder) || (prevState.participants || []).find((p) => p.id === prevHolder) || null;
     const receiver = (nextState.participants || []).find((p) => p.id === nextHolder) || (prevState.participants || []).find((p) => p.id === nextHolder) || null;
     if (passer && receiver && passer.team === receiver.team && isChaserRole(passer.role) && isChaserRole(receiver.role)) {
-      pushEventLog(quafflePassMessage(passer, receiver));
+      pushEventLog(quafflePassMessage(passer, receiver, counters.quaffle_pass));
     }
   }
   if (prevHolder && nextHolder && prevHolder !== nextHolder) {
@@ -385,7 +531,7 @@ function captureGameEvents(prevState, nextState) {
     const isFallbackSteal = prevP && nextP && prevP.team !== nextP.team && isChaserRole(nextP.role) && !isChaserRole(prevP.role) ? true : false;
     const isFallbackSteal2 = prevP && nextP && prevP.team !== nextP.team && isChaserRole(nextP.role) && isChaserRole(prevP.role);
     if (nextP && (isDuelSteal || isFallbackSteal || isFallbackSteal2)) {
-      pushEventLog(quaffleStealMessage(nextP));
+      pushEventLog(quaffleStealMessage(nextP, counters.quaffle_steal));
     }
   }
 }
@@ -993,6 +1139,7 @@ function renderPieces(gameState) {
   const quaffleHolderId = gameState.quaffle?.holderId || null;
 
   els.endTurnBtn.disabled = true;
+  els.endTurnBtn.classList.remove("attention");
 
   for (const p of gameState.participants) {
     if (p.is_observer) continue;
@@ -1036,6 +1183,7 @@ function renderPieces(gameState) {
     const actionReserved = !!ts?.actionReserved;
 
     els.endTurnBtn.disabled = turnEnded || (state.duelUi && state.duelUi.phase === "active");
+    els.endTurnBtn.classList.toggle("attention", !els.endTurnBtn.disabled && Boolean(state.draft?.to || state.draft?.actionType));
     if (turnEnded) {
       state.selected = null;
       clearBoardSelection();
@@ -1171,6 +1319,7 @@ function renderPieces(gameState) {
       if (!res.ok) {
         if (res.status === 403 && res.body?.error === "game_not_started") showToast("Ожидается начало игры");
         else if (res.status === 400 && res.body?.error === "turn_ended") showToast("Ты уже отправил заявку");
+        else if (res.status === 409 && res.body?.error === "turn_timed_out") showToast("Время хода вышло");
         else showToast("Не удалось отменить перемещение");
         await refreshRoomOnce();
         return;
@@ -1201,6 +1350,7 @@ function renderPieces(gameState) {
         else if (planRes.status === 409 && planRes.body?.error === "cell_taken") showToast("Клетка занята");
         else if (planRes.status === 400 && planRes.body?.error === "illegal_move") showToast("Нельзя так переместиться");
         else if (planRes.status === 400 && planRes.body?.error === "turn_ended") showToast("Ты уже отправил заявку");
+        else if (planRes.status === 409 && planRes.body?.error === "turn_timed_out") showToast("Время хода вышло");
         else showToast("Не удалось выбрать клетку");
         await refreshRoomOnce();
         return;
@@ -1219,6 +1369,7 @@ function renderPieces(gameState) {
           if (endRes.status === 403 && endRes.body?.error === "game_not_started") showToast("Ожидается начало игры");
           else if (endRes.status === 400 && endRes.body?.error === "turn_ended") showToast("Ход уже завершен");
           else if (endRes.status === 409 && endRes.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
+          else if (endRes.status === 409 && endRes.body?.error === "turn_timed_out") showToast("Время хода вышло");
           else showToast("Не удалось завершить ход");
           await refreshRoomOnce();
           return;
@@ -1236,6 +1387,7 @@ function renderPieces(gameState) {
           if (endRes.status === 403 && endRes.body?.error === "game_not_started") showToast("Ожидается начало игры");
           else if (endRes.status === 400 && endRes.body?.error === "turn_ended") showToast("Ход уже завершен");
           else if (endRes.status === 409 && endRes.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
+          else if (endRes.status === 409 && endRes.body?.error === "turn_timed_out") showToast("Время хода вышло");
           else showToast("Не удалось завершить ход");
           await refreshRoomOnce();
           return;
@@ -1931,7 +2083,54 @@ function renderRolePicker(gameState, me) {
   els.rolePickerBlock.classList.add("hidden");
 }
 
+function syncServerOffset(gameState) {
+  const serverNow = gameState?.serverNow;
+  if (typeof serverNow === "number" && Number.isFinite(serverNow)) {
+    state.serverOffsetMs = serverNow - Date.now();
+  }
+}
+
+function stopTurnTimerUi() {
+  if (state.turnTimerInterval) clearInterval(state.turnTimerInterval);
+  state.turnTimerInterval = null;
+}
+
+function updateTurnTimerUi(gameState) {
+  if (!els.turnTimerStatus) return;
+  els.turnTimerStatus.classList.remove("danger");
+  const started = Boolean(gameState?.game?.started);
+  const finished = Boolean(gameState?.game?.finished);
+  const paused = Boolean(gameState?.game?.paused);
+  if (!started || finished) {
+    els.turnTimerStatus.textContent = "Таймер: —";
+    return;
+  }
+  if (paused) {
+    els.turnTimerStatus.textContent = "Таймер: пауза";
+    return;
+  }
+
+  const stepStartedAt = gameState?.game?.stepStartedAt || null;
+  const stepStartedAtMs = stepStartedAt ? Date.parse(stepStartedAt) : NaN;
+  const turnMs = typeof gameState?.turnMs === "number" && Number.isFinite(gameState.turnMs) ? gameState.turnMs : 15000;
+  if (!Number.isFinite(stepStartedAtMs)) {
+    els.turnTimerStatus.textContent = "Таймер: —";
+    return;
+  }
+  const nowServerMs = Date.now() + (Number.isFinite(state.serverOffsetMs) ? state.serverOffsetMs : 0);
+  const remainingMs = Math.max(0, Math.min(turnMs, turnMs - (nowServerMs - stepStartedAtMs)));
+  const sec = Math.ceil(remainingMs / 1000);
+  els.turnTimerStatus.textContent = `Таймер: ${sec}с`;
+  if (remainingMs <= 3000) els.turnTimerStatus.classList.add("danger");
+}
+
+function ensureTurnTimerUiRunning() {
+  if (state.turnTimerInterval) return;
+  state.turnTimerInterval = setInterval(() => updateTurnTimerUi(state.gameState), 200);
+}
+
 function renderRoom(gameState) {
+  syncServerOffset(gameState);
   els.roomCodeLabel.textContent = gameState.game.code;
   const matchTitle = `${teamLabel(gameState.game.teamA)} vs ${teamLabel(gameState.game.teamB)}`;
   if (els.pageTitleText) els.pageTitleText.textContent = matchTitle;
@@ -1939,6 +2138,8 @@ function renderRoom(gameState) {
   applyTeamColors(gameState.game.teamA, gameState.game.teamB);
   const stepNo = gameState.game.stepNo ?? null;
   els.stepStatus.textContent = `Ход: ${stepNo ?? "—"}`;
+  updateTurnTimerUi(gameState);
+  ensureTurnTimerUiRunning();
   const a = Number(gameState.game?.scoreA ?? 0);
   const b = Number(gameState.game?.scoreB ?? 0);
   els.scoreStatus.textContent = `Счёт: ${a} — ${b}`;

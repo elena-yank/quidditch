@@ -5,6 +5,8 @@ const BOT_DIFFICULTIES = [];
 const sessionKey = "quidditch.session";
 const state = {
   interval: null,
+  turnTimerInterval: null,
+  serverOffsetMs: 0,
   roomCode: null,
   session: null,
   gameState: null,
@@ -26,10 +28,16 @@ const state = {
     localStream: null,
     peers: new Map()
   },
+  messagePools: {},
   chat: {
-    scope: "team",
+    scope: "all",
+    enabled: true,
+    allowFromServerMs: 0,
+    history: [],
+    historyIds: new Set(),
     stickToBottom: true,
-    lastRenderedId: null
+    lastRenderedId: null,
+    lastRenderedScope: null
   }
 };
 

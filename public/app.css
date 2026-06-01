@@ -594,6 +594,29 @@ button.primary {
   color: var(--text);
 }
 
+#endTurnBtn.attention {
+  border-color: rgba(126, 208, 141, 0.85);
+  box-shadow: 0 0 0 3px rgba(126, 208, 141, 0.18);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  #endTurnBtn.attention {
+    animation: endTurnPulse 1.2s ease-in-out infinite;
+  }
+}
+
+@keyframes endTurnPulse {
+  0% {
+    box-shadow: 0 0 0 3px rgba(126, 208, 141, 0.10);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(126, 208, 141, 0.22);
+  }
+  100% {
+    box-shadow: 0 0 0 3px rgba(126, 208, 141, 0.10);
+  }
+}
+
 .fieldLayout {
   display: flex;
   align-items: flex-start;
@@ -707,6 +730,60 @@ button.primary {
   gap: 10px;
 }
 
+.chatHeaderLeft {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.chatTabs {
+  display: flex;
+  gap: 6px;
+}
+
+.chatToggleBtn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(var(--panel-rgb), 0.75);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.chatToggleBtn[aria-pressed="true"] {
+  background: rgba(255, 107, 107, 0.14);
+  border-color: rgba(255, 107, 107, 0.55);
+  color: var(--text);
+}
+
+.roomChatWrap.chatDisabled {
+  opacity: 0.55;
+}
+
+.chatTabBtn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(var(--panel-rgb), 0.75);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.chatTabBtn[aria-selected="true"] {
+  background: rgba(52, 156, 255, 0.18);
+  border-color: rgba(52, 156, 255, 0.75);
+  color: var(--text);
+}
+
+.chatTabBtn:disabled {
+  opacity: 0.5;
+}
+
 .chatTitle {
   font-size: 12px;
   color: var(--muted);
@@ -740,12 +817,11 @@ button.primary {
 
 .chatInputRow {
   display: grid;
-  grid-template-columns: 140px 1fr 120px;
+  grid-template-columns: 1fr 120px;
   gap: 8px;
   align-items: center;
 }
 
-.chatInputRow select,
 .chatInputRow input {
   width: 100%;
   height: 36px;
@@ -1367,6 +1443,17 @@ button.primary {
   opacity: 0;
   pointer-events: none;
   transition: opacity 140ms ease;
+}
+
+body.inRoom .toast {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  bottom: auto;
+  transform: translate(-50%, -50%);
+  z-index: 9;
+  max-width: min(520px, calc(100% - 24px));
+  text-align: center;
 }
 
 .toast.show {

@@ -38,9 +38,10 @@ function startRoomPolling() {
 function stopRoomPolling() {
   if (state.interval) clearInterval(state.interval);
   state.interval = null;
+  if (typeof stopTurnTimerUi === "function") stopTurnTimerUi();
 }
 
-const VOICE_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+let VOICE_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 let voiceControlsHomeParent = null;
 let voiceControlsHomeNextSibling = null;
 let themeToggleHomeParent = null;
@@ -530,13 +531,20 @@ function resetRoomScopedState() {
   state.lastStunnedStepNo = null;
   state.lastMoveTap = null;
   state.resultsDismissed = false;
-  state.chat.scope = "team";
+  state.messagePools = {};
+  state.chat.scope = "all";
+  state.chat.enabled = true;
+  state.chat.allowFromServerMs = 0;
+  state.chat.history = [];
+  state.chat.historyIds = new Set();
   state.chat.stickToBottom = true;
   state.chat.lastRenderedId = null;
-  if (els.chatScopeSelect) {
-    els.chatScopeSelect.disabled = false;
-    els.chatScopeSelect.value = "team";
-  }
+  state.chat.lastRenderedScope = null;
+  if (els.chatTabAllBtn) els.chatTabAllBtn.setAttribute("aria-selected", "true");
+  if (els.chatTabTeamBtn) els.chatTabTeamBtn.setAttribute("aria-selected", "false");
+  if (els.chatTabTeamBtn) els.chatTabTeamBtn.disabled = false;
+  if (els.chatToggleBtn) els.chatToggleBtn.setAttribute("aria-pressed", "false");
+  if (els.roomChatWrap) els.roomChatWrap.classList.remove("chatDisabled");
   if (els.chatInput) els.chatInput.value = "";
   if (els.chatHint) els.chatHint.textContent = "";
   if (els.chatLog) els.chatLog.innerHTML = "";
@@ -793,6 +801,9 @@ async function bootstrap() {
     for (const r of meta.roles || []) ROLES.set(r.key, r);
     BOT_DIFFICULTIES.length = 0;
     for (const d of meta.botDifficulties || []) BOT_DIFFICULTIES.push(d);
+    if (Array.isArray(meta.voiceIceServers) && meta.voiceIceServers.length > 0) {
+      VOICE_ICE_SERVERS = meta.voiceIceServers;
+    }
 
     state.session = loadSession();
     await setupHome();
@@ -867,6 +878,7 @@ async function bootstrap() {
     };
 
     async function sendChatMessage() {
+      if (!Boolean(state.chat.enabled)) return;
       const myId = state.session?.participantId || null;
       if (!myId) return;
       const gs = state.gameState;
@@ -875,7 +887,9 @@ async function bootstrap() {
       const text = String(els.chatInput?.value || "").trim();
       if (!text) return;
 
-      const scope = els.chatScopeSelect?.value === "all" ? "all" : "team";
+      const me = (gs.participants || []).find((p) => p.id === myId) || null;
+      const canTeam = Boolean(me && !me.is_observer);
+      const scope = canTeam && state.chat.scope === "team" ? "team" : "all";
       const res = await api.chatSend(myId, { scope, text });
       if (!res.ok) {
         if (res.status === 403 && res.body?.error === "game_finished") showToast("Игра уже завершена");
@@ -892,12 +906,37 @@ async function bootstrap() {
     if (els.chatLog) {
       els.chatLog.addEventListener("scroll", syncChatStickToBottomFromScroll);
     }
-    if (els.chatScopeSelect) {
-      els.chatScopeSelect.addEventListener("change", () => {
-        state.chat.scope = els.chatScopeSelect.value === "all" ? "all" : "team";
+    const syncChatTab = (nextScope) => {
+      state.chat.scope = nextScope === "team" ? "team" : "all";
+      const gs = state.gameState;
+      const myId = state.session?.participantId || null;
+      const me = myId && gs ? (gs.participants || []).find((p) => p.id === myId) || null : null;
+      if (gs) renderChat(gs, me);
+    };
+    if (els.chatTabAllBtn) {
+      els.chatTabAllBtn.addEventListener("click", () => syncChatTab("all"));
+    }
+    if (els.chatTabTeamBtn) {
+      els.chatTabTeamBtn.addEventListener("click", () => syncChatTab("team"));
+    }
+    if (els.chatToggleBtn) {
+      els.chatToggleBtn.addEventListener("click", () => {
         const gs = state.gameState;
         const myId = state.session?.participantId || null;
         const me = myId && gs ? (gs.participants || []).find((p) => p.id === myId) || null : null;
+
+        if (Boolean(state.chat.enabled)) {
+          state.chat.enabled = false;
+          if (gs) renderChat(gs, me);
+          return;
+        }
+
+        state.chat.enabled = true;
+        const serverNowMs =
+          gs && typeof gs.serverNow === "number" && Number.isFinite(gs.serverNow)
+            ? gs.serverNow
+            : Date.now() + (Number.isFinite(state.serverOffsetMs) ? state.serverOffsetMs : 0);
+        state.chat.allowFromServerMs = serverNowMs;
         if (gs) renderChat(gs, me);
       });
     }
@@ -1023,7 +1062,7 @@ async function bootstrap() {
       state.draft.actionPickedAt = Date.now();
       state.draft.actionTo = null;
       state.draft.actionBludger = null;
-      showToast(me && isKeeperRole(me.role) ? "Заявка: поднять квоффл" : "Заявка: взять квоффл");
+      showToast(me && isKeeperRole(me.role) ? "Выбрано: поднять квоффл. Нажми «Завершить ход»." : "Выбрано: взять квоффл. Нажми «Завершить ход».");
       await refreshRoomOnce();
     });
 
@@ -1091,7 +1130,7 @@ async function bootstrap() {
       state.draft.actionPickedAt = Date.now();
       state.draft.actionTo = null;
       state.draft.actionBludger = null;
-      showToast("Заявка: выхват квоффла");
+      showToast("Выбрано: выхват квоффла. Нажми «Завершить ход».");
       await refreshRoomOnce();
     });
 
@@ -1440,6 +1479,7 @@ async function bootstrap() {
         else if (res.status === 400 && res.body?.error === "use_plans") showToast("Сейчас работает режим заявок");
         else if (res.status === 400 && res.body?.error === "illegal_move") showToast("Нельзя так переместиться");
         else if (res.status === 409 && res.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
+        else if (res.status === 409 && res.body?.error === "turn_timed_out") showToast("Время хода вышло");
         else if (res.status === 400 && res.body?.error === "too_far") showToast("Слишком далеко");
         else if (res.status === 400 && res.body?.error === "not_opponent_goal") showToast("Это не ворота противника");
         else if (res.status === 400 && res.body?.error === "no_quaffle") showToast("У тебя нет квоффла");

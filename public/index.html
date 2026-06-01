@@ -194,6 +194,7 @@
             </div>
             <div class="sectionTitleRight">
               <div class="pill stepPill" id="stepStatus">Ход: —</div>
+              <div class="pill stepPill" id="turnTimerStatus">Таймер: —</div>
               <button class="pillBtn iconOnly" id="exportLogsBtn" title="Экспортировать логи игры" type="button" aria-label="Экспортировать логи игры">
                 <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 16V4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
@@ -273,15 +274,18 @@
 
           <div class="roomChatWrap" id="roomChatWrap">
             <div class="chatHeader">
-              <div class="chatTitle">Чат</div>
+              <div class="chatHeaderLeft">
+                <div class="chatTitle">Чат</div>
+                <div class="chatTabs" role="tablist" aria-label="Вкладки чата">
+                  <button id="chatTabAllBtn" class="chatTabBtn" type="button" role="tab" aria-selected="true">Общий</button>
+                  <button id="chatTabTeamBtn" class="chatTabBtn" type="button" role="tab" aria-selected="false">Команда</button>
+                </div>
+                <button id="chatToggleBtn" class="chatToggleBtn" type="button" aria-pressed="false">Выключить</button>
+              </div>
               <div class="chatHint" id="chatHint"></div>
             </div>
             <div class="chatLog" id="chatLog"></div>
             <div class="chatInputRow">
-              <select id="chatScopeSelect" aria-label="Кому писать">
-                <option value="team">команде</option>
-                <option value="all">всем</option>
-              </select>
               <input id="chatInput" type="text" autocomplete="off" maxlength="280" placeholder="Написать сообщение…" />
               <button id="chatSendBtn" type="button">Отправить</button>
             </div>

@@ -78,6 +78,44 @@ const pool = new Pool({
 const nanoidRoom = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 6);
 const nanoidId = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", 21);
 
+function parseVoiceIceServersEnv() {
+  const rawJson = process.env.VOICE_ICE_SERVERS;
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch {}
+  }
+
+  const servers = [];
+
+  const stunRaw = process.env.VOICE_STUN_URLS;
+  if (stunRaw) {
+    const urls = String(stunRaw)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (urls.length > 0) servers.push({ urls });
+  }
+
+  const turnRaw = process.env.VOICE_TURN_URLS;
+  if (turnRaw) {
+    const urls = String(turnRaw)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (urls.length > 0) {
+      const username = process.env.VOICE_TURN_USERNAME != null ? String(process.env.VOICE_TURN_USERNAME) : undefined;
+      const credential = process.env.VOICE_TURN_CREDENTIAL != null ? String(process.env.VOICE_TURN_CREDENTIAL) : undefined;
+      servers.push({ urls, username, credential });
+    }
+  }
+
+  return servers.length > 0 ? servers : null;
+}
+
+const VOICE_ICE_SERVERS = parseVoiceIceServersEnv();
+
 const TEAMS = [
   { key: "gryffindor", label: "Гриффиндор" },
   { key: "hufflepuff", label: "Пуффендуй" },
@@ -136,6 +174,8 @@ const GOALS_LEFT_SET = new Set(GOALS_LEFT);
 const GOALS_RIGHT_SET = new Set(GOALS_RIGHT);
 
 const PLANNED_TURNS = true;
+const TURN_TIMEOUT_MS = 15000;
+const ENFORCE_QUAFFLE_STEAL_LOCKS = false;
 
 const SNITCH_SPAWNS = ["A1", "G1", "A7", "G7", "A13", "G13"];
 const SNITCH_SPAWNS_SET = new Set(SNITCH_SPAWNS);
@@ -309,7 +349,7 @@ async function expireOldDuels(gameId) {
       await client.query("COMMIT");
       return;
     }
-    if (Date.now() - startedAt <= 15000) {
+    if (Date.now() - startedAt <= TURN_TIMEOUT_MS) {
       await client.query("COMMIT");
       return;
     }
@@ -397,6 +437,89 @@ async function expireOldDuels(gameId) {
   }
 }
 
+async function expireOldTurns(gameId) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const gameRes = await client.query(
+      "SELECT id, step_no, step_started_at, started, finished, paused FROM games WHERE id = $1 FOR UPDATE",
+      [gameId]
+    );
+    const game = gameRes.rows[0] || null;
+    if (!game) {
+      await client.query("COMMIT");
+      return { changed: false };
+    }
+    if (Boolean(game.finished) || Boolean(game.paused)) {
+      await client.query("COMMIT");
+      return { changed: false };
+    }
+
+    const startedEffective = await ensureGameStartedEffective(client, game.id, Boolean(game.started));
+    if (!startedEffective) {
+      await client.query("COMMIT");
+      return { changed: false };
+    }
+
+    const stepNo = Number(game.step_no || 1);
+    const stepStartedAtMs = game.step_started_at ? new Date(game.step_started_at).getTime() : NaN;
+    if (!Number.isFinite(stepStartedAtMs)) {
+      await client.query("UPDATE games SET step_started_at = NOW() WHERE id = $1", [game.id]);
+      await client.query("COMMIT");
+      return { changed: true };
+    }
+    if (Date.now() - stepStartedAtMs < TURN_TIMEOUT_MS) {
+      await client.query("COMMIT");
+      return { changed: false };
+    }
+
+    const activeRes = await client.query(
+      `
+        SELECT p.id
+        FROM participants p
+        WHERE p.game_id = $1 AND p.is_observer = FALSE AND p.role IN ('keeper', 'chaser1', 'chaser2', 'beater', 'seeker')
+      `,
+      [game.id]
+    );
+    const activeIds = activeRes.rows.map((r) => r.id);
+    if (activeIds.length === 0) {
+      await client.query("COMMIT");
+      return { changed: false };
+    }
+
+    for (const pid of activeIds) {
+      await ensureTurnState(client, game.id, pid, stepNo);
+    }
+
+    const upd = await client.query(
+      `
+        UPDATE turn_states
+        SET ended = TRUE,
+            moved = FALSE,
+            action_reserved = FALSE,
+            action_done = FALSE,
+            planned_to = NULL,
+            planned_action_first = FALSE,
+            planned_action_type = NULL,
+            planned_action_to = NULL,
+            planned_action_bludger = NULL,
+            updated_at = NOW()
+        WHERE game_id = $1 AND step_no = $2 AND ended = FALSE
+      `,
+      [game.id, stepNo]
+    );
+
+    await maybeAdvanceStep(client, game.id);
+    await client.query("COMMIT");
+    return { changed: upd.rowCount > 0 };
+  } catch {
+    await client.query("ROLLBACK");
+    return { changed: false };
+  } finally {
+    client.release();
+  }
+}
+
 function getDbNameFromUrl(connectionString) {
   const u = new URL(connectionString);
   const name = decodeURIComponent(String(u.pathname || "").replace(/^\//, ""));
@@ -452,6 +575,8 @@ async function initDb() {
         snitch_revealed BOOLEAN NOT NULL DEFAULT FALSE,
         snitch_caught_by_id TEXT NULL,
         snitch_caught_step_no INTEGER NULL,
+        snitch_reveal_count INTEGER NOT NULL DEFAULT 0,
+        snitch_hide_count INTEGER NOT NULL DEFAULT 0,
         quaffle_pos TEXT NULL,
         quaffle_holder_id TEXT NULL,
         quaffle_lock_holder_id TEXT NULL,
@@ -460,6 +585,7 @@ async function initDb() {
         bludger1_pos TEXT NULL,
         bludger2_pos TEXT NULL,
         step_no INTEGER NOT NULL DEFAULT 1,
+        step_started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
@@ -482,10 +608,18 @@ async function initDb() {
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS snitch_revealed BOOLEAN`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS snitch_caught_by_id TEXT`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS snitch_caught_step_no INTEGER`);
+    await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS snitch_reveal_count INTEGER`);
+    await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS snitch_hide_count INTEGER`);
     await client.query(`UPDATE games SET score_a = 0 WHERE score_a IS NULL`);
     await client.query(`UPDATE games SET score_b = 0 WHERE score_b IS NULL`);
     await client.query(`UPDATE games SET snitch_pos = 'A1' WHERE snitch_pos IS NULL`);
     await client.query(`UPDATE games SET snitch_revealed = FALSE WHERE snitch_revealed IS NULL`);
+    await client.query(`UPDATE games SET snitch_reveal_count = 0 WHERE snitch_reveal_count IS NULL`);
+    await client.query(`UPDATE games SET snitch_hide_count = 0 WHERE snitch_hide_count IS NULL`);
+    await client.query(`ALTER TABLE games ALTER COLUMN snitch_reveal_count SET DEFAULT 0`);
+    await client.query(`ALTER TABLE games ALTER COLUMN snitch_hide_count SET DEFAULT 0`);
+    await client.query(`ALTER TABLE games ALTER COLUMN snitch_reveal_count SET NOT NULL`);
+    await client.query(`ALTER TABLE games ALTER COLUMN snitch_hide_count SET NOT NULL`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS quaffle_pos TEXT`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS quaffle_holder_id TEXT`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS quaffle_lock_holder_id TEXT`);
@@ -495,6 +629,10 @@ async function initDb() {
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS bludger2_pos TEXT`);
     await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS step_no INTEGER`);
     await client.query(`UPDATE games SET step_no = 1 WHERE step_no IS NULL`);
+    await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS step_started_at TIMESTAMPTZ`);
+    await client.query(`UPDATE games SET step_started_at = COALESCE(step_started_at, started_at, created_at, NOW()) WHERE step_started_at IS NULL`);
+    await client.query(`ALTER TABLE games ALTER COLUMN step_started_at SET DEFAULT NOW()`);
+    await client.query(`ALTER TABLE games ALTER COLUMN step_started_at SET NOT NULL`);
     await client.query(`ALTER TABLE games ALTER COLUMN quaffle_pos SET DEFAULT 'D7'`);
     await client.query(`UPDATE games SET quaffle_pos = 'D7' WHERE quaffle_pos IS NULL AND quaffle_holder_id IS NULL`);
     await client.query(`ALTER TABLE games ALTER COLUMN bludger1_pos SET DEFAULT 'A7'`);
@@ -711,10 +849,64 @@ async function ensureGameStartedEffective(client, gameId, startedRaw) {
   );
   const hasJudge = Boolean(judgeRes.rows[0]);
   if (!hasJudge) {
-    await client.query("UPDATE games SET started = TRUE, started_at = COALESCE(started_at, NOW()) WHERE id = $1", [gameId]);
+    await client.query(
+      "UPDATE games SET started = TRUE, started_at = COALESCE(started_at, NOW()), step_started_at = NOW() WHERE id = $1",
+      [gameId]
+    );
     return true;
   }
   return false;
+}
+
+async function forceExpireTurnsIfTimedOutClient(client, gameRow) {
+  if (!gameRow) return { expired: false };
+  if (Boolean(gameRow.finished) || Boolean(gameRow.paused)) return { expired: false };
+  if (!Boolean(gameRow.started)) return { expired: false };
+
+  const gameId = gameRow.game_id || gameRow.id;
+  if (!gameId) return { expired: false };
+
+  const stepNo = Number(gameRow.step_no || 1);
+  const stepStartedAtMs = gameRow.step_started_at ? new Date(gameRow.step_started_at).getTime() : NaN;
+  if (!Number.isFinite(stepStartedAtMs)) {
+    await client.query("UPDATE games SET step_started_at = NOW() WHERE id = $1", [gameId]);
+    return { expired: false };
+  }
+  if (Date.now() - stepStartedAtMs < TURN_TIMEOUT_MS) return { expired: false };
+
+  const activeRes = await client.query(
+    `
+      SELECT p.id
+      FROM participants p
+      WHERE p.game_id = $1 AND p.is_observer = FALSE AND p.role IN ('keeper', 'chaser1', 'chaser2', 'beater', 'seeker')
+    `,
+    [gameId]
+  );
+  const activeIds = activeRes.rows.map((r) => r.id);
+  for (const pid of activeIds) {
+    await ensureTurnState(client, gameId, pid, stepNo);
+  }
+
+  await client.query(
+    `
+      UPDATE turn_states
+      SET ended = TRUE,
+          moved = FALSE,
+          action_reserved = FALSE,
+          action_done = FALSE,
+          planned_to = NULL,
+          planned_action_first = FALSE,
+          planned_action_type = NULL,
+          planned_action_to = NULL,
+          planned_action_bludger = NULL,
+          updated_at = NOW()
+      WHERE game_id = $1 AND step_no = $2 AND ended = FALSE
+    `,
+    [gameId, stepNo]
+  );
+
+  await maybeAdvanceStep(client, gameId);
+  return { expired: true };
 }
 
 async function ensureTurnState(client, gameId, participantId, stepNo) {
@@ -826,7 +1018,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
   if (depth > 6) return;
 
   const gameRes = await client.query(
-    "SELECT step_no, started, finished, winner_team, score_a, score_b, snitch_pos, snitch_revealed, snitch_caught_by_id, snitch_caught_step_no, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, quaffle_steal_cooldown_step_no, bludger1_pos, bludger2_pos, team_a, team_b FROM games WHERE id = $1",
+    "SELECT step_no, started, finished, winner_team, score_a, score_b, snitch_pos, snitch_revealed, snitch_caught_by_id, snitch_caught_step_no, snitch_reveal_count, snitch_hide_count, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, quaffle_steal_cooldown_step_no, bludger1_pos, bludger2_pos, team_a, team_b FROM games WHERE id = $1",
     [gameId]
   );
   const stepNo = Number(gameRes.rows[0]?.step_no || 1);
@@ -897,6 +1089,38 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     actionPosById.set(p.id, pos);
   }
 
+  const moveToByIdBeforeActions = new Map();
+  {
+    const claimedTargets = new Set();
+    for (const p of participants) {
+      if (Boolean(p.stunned)) continue;
+      const from = fromById.get(p.id);
+      const to = normalizeCoord(p.planned_to);
+      if (!from || !to) continue;
+      if (!canPlannedMove({ participant: p, from, to, game: gameForSpawn })) continue;
+      if (claimedTargets.has(to)) continue;
+      moveToByIdBeforeActions.set(p.id, to);
+      claimedTargets.add(to);
+    }
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const nonMoverPositions = new Set();
+      for (const p of participants) {
+        const from = fromById.get(p.id);
+        if (!from) continue;
+        if (!moveToByIdBeforeActions.has(p.id)) nonMoverPositions.add(from);
+      }
+      for (const [pid, to] of moveToByIdBeforeActions.entries()) {
+        if (nonMoverPositions.has(to)) {
+          moveToByIdBeforeActions.delete(pid);
+          changed = true;
+        }
+      }
+    }
+  }
+
   const occupantChaserByCoord = new Map();
   const occupantKeeperByCoord = new Map();
   const occupantAnyByCoord = new Map();
@@ -920,6 +1144,8 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
   let snitchRevealed = Boolean(gameRow?.snitch_revealed);
   let snitchCaughtById = gameRow?.snitch_caught_by_id || null;
   let snitchCaughtStepNo = gameRow?.snitch_caught_step_no != null ? Number(gameRow.snitch_caught_step_no) : null;
+  let snitchRevealCount = gameRow?.snitch_reveal_count != null ? Number(gameRow.snitch_reveal_count) : 0;
+  let snitchHideCount = gameRow?.snitch_hide_count != null ? Number(gameRow.snitch_hide_count) : 0;
   const hitStunnedIds = new Set();
   const bludgersHitThisStep = new Set();
   let scoreA = gameRow?.score_a != null ? Number(gameRow.score_a) : 0;
@@ -1027,7 +1253,9 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       if (!holder || holder.team === p.team) continue;
       const holderPos = actionPosById.get(qHolderId);
       if (!holderPos) continue;
-      const d = chebyshevDistance(from, holderPos);
+      const actionFirst = Boolean(p.planned_action_first);
+      const stealFrom = actionFirst ? from : (moveToByIdBeforeActions.get(p.id) || from);
+      const d = chebyshevDistance(stealFrom, holderPos);
       if (d == null || d > 1) continue;
       const duelId = nanoidId();
       const ins = await client.query(
@@ -1895,6 +2123,9 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     else if (snitchRevealed && allFar) nextSnitchRevealed = false;
   }
 
+  if (!snitchRevealed && nextSnitchRevealed) snitchRevealCount += 1;
+  else if (snitchRevealed && !nextSnitchRevealed && !nextSnitchCaughtById) snitchHideCount += 1;
+
   nextSnitchPos = normalizeCoord(nextSnitchPos) || nextSnitchPos;
   if (nextSnitchPos && snitchForbidden.has(nextSnitchPos)) {
     const fixed = findNearestFreeCoord(nextSnitchPos, snitchForbidden);
@@ -1941,7 +2172,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
   );
 
   await client.query(
-    "UPDATE games SET step_no = $2, score_a = $3, score_b = $4, finished = $5, finished_at = CASE WHEN $5 THEN COALESCE(finished_at, NOW()) ELSE finished_at END, winner_team = CASE WHEN $5 THEN $6 ELSE winner_team END, snitch_pos = $7, snitch_revealed = $8, snitch_caught_by_id = $9, snitch_caught_step_no = $10, bludger1_pos = $11, bludger2_pos = $12, quaffle_holder_id = $13, quaffle_pos = $14, quaffle_lock_holder_id = $15, quaffle_lock_step_no = $16 WHERE id = $1",
+    "UPDATE games SET step_no = $2, step_started_at = NOW(), score_a = $3, score_b = $4, finished = $5, finished_at = CASE WHEN $5 THEN COALESCE(finished_at, NOW()) ELSE finished_at END, winner_team = CASE WHEN $5 THEN $6 ELSE winner_team END, snitch_pos = $7, snitch_revealed = $8, snitch_caught_by_id = $9, snitch_caught_step_no = $10, bludger1_pos = $11, bludger2_pos = $12, quaffle_holder_id = $13, quaffle_pos = $14, quaffle_lock_holder_id = $15, quaffle_lock_step_no = $16, snitch_reveal_count = $17, snitch_hide_count = $18 WHERE id = $1",
     [
       gameId,
       nextStep,
@@ -1958,7 +2189,9 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       nextQuaffleHolderId,
       nextQuafflePos,
       nextLockHolderId,
-      nextLockStepNo
+      nextLockStepNo,
+      snitchRevealCount,
+      snitchHideCount
     ]
   );
   await client.query(
@@ -2160,7 +2393,7 @@ async function canChaserSteal({ client, from, participant, game, tsById }) {
   const lockHolderId = game.quaffle_lock_holder_id || null;
   const lockStepNo = game.quaffle_lock_step_no != null ? Number(game.quaffle_lock_step_no) : null;
   const stepNo = game.step_no != null ? Number(game.step_no) : null;
-  if (lockHolderId && lockStepNo != null && stepNo != null) {
+  if (ENFORCE_QUAFFLE_STEAL_LOCKS && lockHolderId && lockStepNo != null && stepNo != null) {
     if (holderId === lockHolderId && stepNo === lockStepNo + 1) return false;
   }
 
@@ -2349,7 +2582,8 @@ app.get("/api/meta", (_req, res) => {
   res.json({
     teams: TEAMS,
     roles: ROLES,
-    botDifficulties: BOT_DIFFICULTIES
+    botDifficulties: BOT_DIFFICULTIES,
+    voiceIceServers: VOICE_ICE_SERVERS || []
   });
 });
 
@@ -3019,7 +3253,7 @@ app.get("/api/games/:code/state", async (req, res) => {
   const viewerId = String(req.query?.viewerId || "").trim();
 
   const gameRes = await pool.query(
-    "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, voice_enabled, snitch_pos, snitch_revealed, snitch_caught_by_id, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, created_at FROM games WHERE code = $1",
+    "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, voice_enabled, snitch_pos, snitch_revealed, snitch_caught_by_id, snitch_reveal_count, snitch_hide_count, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, step_started_at, created_at FROM games WHERE code = $1",
     [code]
   );
   const game = gameRes.rows[0];
@@ -3035,40 +3269,32 @@ app.get("/api/games/:code/state", async (req, res) => {
   const startedEffective0 = Boolean(game.started) || !judgePresent0;
   if (!game.started && startedEffective0) {
     try {
-      await pool.query("UPDATE games SET started = TRUE, started_at = COALESCE(started_at, NOW()) WHERE id = $1", [game.id]);
+      await pool.query("UPDATE games SET started = TRUE, started_at = COALESCE(started_at, NOW()), step_started_at = NOW() WHERE id = $1", [game.id]);
       game.started = true;
     } catch {}
+  }
+
+  const turnsExpired =
+    startedEffective0 && !Boolean(game.finished) && !Boolean(game.paused) ? await expireOldTurns(game.id) : { changed: false };
+  if (turnsExpired.changed) {
+    const gameRes0 = await pool.query(
+      "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, voice_enabled, snitch_pos, snitch_revealed, snitch_caught_by_id, snitch_reveal_count, snitch_hide_count, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, step_started_at, created_at FROM games WHERE code = $1",
+      [code]
+    );
+    const nextGame0 = gameRes0.rows[0];
+    if (!nextGame0) return res.status(404).json({ error: "not_found" });
+    Object.assign(game, nextGame0);
   }
 
   const botsRan = startedEffective0 && !Boolean(game.finished) && !Boolean(game.paused) ? await maybeRunBots(game.id) : { changed: false };
   if (botsRan.changed) {
     const gameRes2 = await pool.query(
-      "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, voice_enabled, snitch_pos, snitch_revealed, snitch_caught_by_id, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, created_at FROM games WHERE code = $1",
+      "SELECT id, code, team_a, team_b, started, started_at, finished, finished_at, winner_team, score_a, score_b, paused, voice_enabled, snitch_pos, snitch_revealed, snitch_caught_by_id, snitch_reveal_count, snitch_hide_count, quaffle_pos, quaffle_holder_id, quaffle_lock_holder_id, quaffle_lock_step_no, bludger1_pos, bludger2_pos, step_no, step_started_at, created_at FROM games WHERE code = $1",
       [code]
     );
     const nextGame = gameRes2.rows[0];
     if (!nextGame) return res.status(404).json({ error: "not_found" });
-    game.id = nextGame.id;
-    game.team_a = nextGame.team_a;
-    game.team_b = nextGame.team_b;
-    game.started = nextGame.started;
-    game.started_at = nextGame.started_at;
-    game.finished = nextGame.finished;
-    game.finished_at = nextGame.finished_at;
-    game.winner_team = nextGame.winner_team;
-    game.score_a = nextGame.score_a;
-    game.score_b = nextGame.score_b;
-    game.paused = nextGame.paused;
-    game.voice_enabled = nextGame.voice_enabled;
-    game.snitch_pos = nextGame.snitch_pos;
-    game.snitch_revealed = nextGame.snitch_revealed;
-    game.snitch_caught_by_id = nextGame.snitch_caught_by_id;
-    game.quaffle_pos = nextGame.quaffle_pos;
-    game.quaffle_holder_id = nextGame.quaffle_holder_id;
-    game.bludger1_pos = nextGame.bludger1_pos;
-    game.bludger2_pos = nextGame.bludger2_pos;
-    game.step_no = nextGame.step_no;
-    game.created_at = nextGame.created_at;
+    Object.assign(game, nextGame);
 
     const participantsRes2 = await pool.query(
       "SELECT id, nickname, team, role, pos, snitch_progress, stat_quaffle_pickups, stat_quaffle_steals, stat_quaffle_passes, stat_goals_scored, stat_goals_saved, stat_snitch_catches, is_bot, bot_difficulty, is_observer, is_judge, created_at FROM participants WHERE game_id = $1 ORDER BY created_at ASC",
@@ -3184,7 +3410,41 @@ app.get("/api/games/:code/state", async (req, res) => {
   const finished = Boolean(game.finished);
   const results = finished ? buildGameResults(game, participantsRes.rows) : null;
 
+  const pickupCount = (participantsRes.rows || []).reduce((acc, p) => acc + (p.stat_quaffle_pickups != null ? Number(p.stat_quaffle_pickups) : 0), 0);
+  const passCount = (participantsRes.rows || []).reduce((acc, p) => acc + (p.stat_quaffle_passes != null ? Number(p.stat_quaffle_passes) : 0), 0);
+  const stealCount = (participantsRes.rows || []).reduce((acc, p) => acc + (p.stat_quaffle_steals != null ? Number(p.stat_quaffle_steals) : 0), 0);
+  const snitchRevealCount = game.snitch_reveal_count != null ? Number(game.snitch_reveal_count) : 0;
+  const snitchHideCount = game.snitch_hide_count != null ? Number(game.snitch_hide_count) : 0;
+
+  const eventCountersRes = await pool.query(
+    `
+      SELECT kind, COUNT(*)::int AS cnt
+      FROM game_events
+      WHERE game_id = $1 AND kind = ANY($2::text[])
+      GROUP BY kind
+    `,
+    [game.id, ["hit_bludger", "stun_bludger", "goal"]]
+  );
+  const eventCounters = {};
+  for (const r of eventCountersRes.rows || []) {
+    if (!r || !r.kind) continue;
+    eventCounters[String(r.kind)] = Number(r.cnt || 0);
+  }
+  const messageCounters = {
+    free_quaffle_pickup: pickupCount,
+    quaffle_pass: passCount,
+    quaffle_steal: stealCount,
+    bludger_hit: eventCounters.hit_bludger || 0,
+    bludger_stun: eventCounters.stun_bludger || 0,
+    goal_scored: eventCounters.goal || 0,
+    snitch_reveal: snitchRevealCount,
+    snitch_hide: snitchHideCount
+  };
+
   res.json({
+    serverNow: Date.now(),
+    turnMs: TURN_TIMEOUT_MS,
+    messageCounters,
     game: {
       code: game.code,
       teamA: game.team_a,
@@ -3198,6 +3458,7 @@ app.get("/api/games/:code/state", async (req, res) => {
       paused: Boolean(game.paused),
       voiceEnabled: Boolean(game.voice_enabled),
       stepNo: stepNo,
+      stepStartedAt: game.step_started_at || null,
       createdAt: game.created_at
     },
     results,
@@ -3625,7 +3886,7 @@ app.post("/api/participants/:id/plan/move", async (req, res) => {
     const pRes = await client.query(
       `
         SELECT p.id, p.game_id, p.team, p.role, p.pos, p.is_observer,
-               g.step_no, g.team_a, g.team_b, g.started, g.finished, g.paused
+               g.step_no, g.step_started_at, g.team_a, g.team_b, g.started, g.finished, g.paused
         FROM participants p
         JOIN games g ON g.id = p.game_id
         WHERE p.id = $1
@@ -3659,6 +3920,12 @@ app.post("/api/participants/:id/plan/move", async (req, res) => {
     if (!startedEffective) {
       await client.query("ROLLBACK");
       return res.status(403).json({ error: "game_not_started" });
+    }
+
+    const expired = await forceExpireTurnsIfTimedOutClient(client, p);
+    if (expired.expired) {
+      await client.query("COMMIT");
+      return res.status(409).json({ error: "turn_timed_out" });
     }
 
     const stepNo = Number(p.step_no || 1);
@@ -3876,7 +4143,7 @@ app.post("/api/participants/:id/turn/end", async (req, res) => {
     const pRes = await client.query(
       `
         SELECT p.id, p.game_id, p.team, p.role, p.pos, p.is_observer,
-               g.step_no, g.team_a, g.team_b, g.started, g.finished, g.paused,
+               g.step_no, g.step_started_at, g.team_a, g.team_b, g.started, g.finished, g.paused,
                g.quaffle_pos, g.quaffle_holder_id,
                g.quaffle_lock_holder_id, g.quaffle_lock_step_no, g.quaffle_steal_cooldown_step_no,
                g.bludger1_pos, g.bludger2_pos
@@ -3913,6 +4180,12 @@ app.post("/api/participants/:id/turn/end", async (req, res) => {
     if (!startedEffective) {
       await client.query("ROLLBACK");
       return res.status(403).json({ error: "game_not_started" });
+    }
+
+    const expired = await forceExpireTurnsIfTimedOutClient(client, p);
+    if (expired.expired) {
+      await client.query("COMMIT");
+      return res.status(409).json({ error: "turn_timed_out" });
     }
 
     const stepNo = Number(p.step_no || 1);
@@ -4016,13 +4289,13 @@ app.post("/api/participants/:id/turn/end", async (req, res) => {
       }
       const stealCooldownStepNo =
         p.quaffle_steal_cooldown_step_no != null ? Number(p.quaffle_steal_cooldown_step_no) : null;
-      if (stealCooldownStepNo != null && stepNo === stealCooldownStepNo + 1) {
+      if (ENFORCE_QUAFFLE_STEAL_LOCKS && stealCooldownStepNo != null && stepNo === stealCooldownStepNo + 1) {
         await client.query("ROLLBACK");
         return res.status(400).json({ error: "steal_cooldown" });
       }
       const lockHolderId = p.quaffle_lock_holder_id || null;
       const lockStepNo = p.quaffle_lock_step_no != null ? Number(p.quaffle_lock_step_no) : null;
-      if (lockHolderId && lockStepNo != null && stepNo === lockStepNo + 1 && p.quaffle_holder_id === lockHolderId) {
+      if (ENFORCE_QUAFFLE_STEAL_LOCKS && lockHolderId && lockStepNo != null && stepNo === lockStepNo + 1 && p.quaffle_holder_id === lockHolderId) {
         await client.query("ROLLBACK");
         return res.status(400).json({ error: "steal_locked" });
       }
@@ -4253,7 +4526,7 @@ app.post("/api/participants/:id/game/start", async (req, res) => {
     }
 
     if (!p.started) {
-      await client.query("UPDATE games SET started = TRUE, started_at = NOW() WHERE id = $1", [p.game_id]);
+      await client.query("UPDATE games SET started = TRUE, started_at = NOW(), step_started_at = NOW() WHERE id = $1", [p.game_id]);
     }
 
     await client.query("COMMIT");
@@ -5150,10 +5423,11 @@ app.post("/api/judge/:judgeId/pause", async (req, res) => {
     }
 
     const newPaused = !Boolean(judge.paused);
-    await client.query(
-      "UPDATE games SET paused = $1 WHERE id = $2",
-      [newPaused, judge.game_id]
-    );
+    if (newPaused) {
+      await client.query("UPDATE games SET paused = TRUE WHERE id = $1", [judge.game_id]);
+    } else {
+      await client.query("UPDATE games SET paused = FALSE, step_started_at = NOW() WHERE id = $1", [judge.game_id]);
+    }
 
     await client.query("COMMIT");
     res.json({ ok: true, paused: newPaused });
@@ -6013,9 +6287,22 @@ app.get(["/judge-room-creation", "/judge-room-creation/"], (_req, res) => {
 });
 
 const publicDir = path.join(__dirname, "public");
-app.use(express.static(publicDir));
+app.use(
+  express.static(publicDir, {
+    maxAge: 0,
+    etag: true,
+    lastModified: true,
+    setHeaders: (res, filePath) => {
+      const p = String(filePath || "").toLowerCase();
+      if (p.endsWith(".html") || p.endsWith(".js") || p.endsWith(".css")) {
+        res.setHeader("Cache-Control", "no-store");
+      }
+    }
+  })
+);
 
 app.get("*", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   res.sendFile(path.join(publicDir, "index.html"));
 });
 
