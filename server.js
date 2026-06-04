@@ -1,4 +1,5 @@
 const path = require("path");
+const fs = require("fs");
 
 require("dotenv").config();
 
@@ -680,6 +681,8 @@ async function initDb() {
         stat_goals_scored INTEGER NOT NULL DEFAULT 0,
         stat_goals_saved INTEGER NOT NULL DEFAULT 0,
         stat_snitch_catches INTEGER NOT NULL DEFAULT 0,
+        stat_bludger_hits INTEGER NOT NULL DEFAULT 0,
+        stat_bludger_hits_to_players INTEGER NOT NULL DEFAULT 0,
         pos TEXT NULL,
         is_bot BOOLEAN NOT NULL DEFAULT FALSE,
         bot_difficulty SMALLINT NULL,
@@ -695,6 +698,8 @@ async function initDb() {
     await client.query(`ALTER TABLE participants ADD COLUMN IF NOT EXISTS stat_goals_scored INTEGER`);
     await client.query(`ALTER TABLE participants ADD COLUMN IF NOT EXISTS stat_goals_saved INTEGER`);
     await client.query(`ALTER TABLE participants ADD COLUMN IF NOT EXISTS stat_snitch_catches INTEGER`);
+    await client.query(`ALTER TABLE participants ADD COLUMN IF NOT EXISTS stat_bludger_hits INTEGER`);
+    await client.query(`ALTER TABLE participants ADD COLUMN IF NOT EXISTS stat_bludger_hits_to_players INTEGER`);
     await client.query(`ALTER TABLE participants ADD COLUMN IF NOT EXISTS is_judge BOOLEAN`);
     await client.query(`UPDATE participants SET snitch_progress = 0 WHERE snitch_progress IS NULL`);
     await client.query(`UPDATE participants SET stat_quaffle_pickups = 0 WHERE stat_quaffle_pickups IS NULL`);
@@ -703,18 +708,24 @@ async function initDb() {
     await client.query(`UPDATE participants SET stat_goals_scored = 0 WHERE stat_goals_scored IS NULL`);
     await client.query(`UPDATE participants SET stat_goals_saved = 0 WHERE stat_goals_saved IS NULL`);
     await client.query(`UPDATE participants SET stat_snitch_catches = 0 WHERE stat_snitch_catches IS NULL`);
+    await client.query(`UPDATE participants SET stat_bludger_hits = 0 WHERE stat_bludger_hits IS NULL`);
+    await client.query(`UPDATE participants SET stat_bludger_hits_to_players = 0 WHERE stat_bludger_hits_to_players IS NULL`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_pickups SET DEFAULT 0`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_steals SET DEFAULT 0`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_passes SET DEFAULT 0`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_goals_scored SET DEFAULT 0`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_goals_saved SET DEFAULT 0`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_snitch_catches SET DEFAULT 0`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_bludger_hits SET DEFAULT 0`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_bludger_hits_to_players SET DEFAULT 0`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_pickups SET NOT NULL`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_steals SET NOT NULL`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_quaffle_passes SET NOT NULL`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_goals_scored SET NOT NULL`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_goals_saved SET NOT NULL`);
     await client.query(`ALTER TABLE participants ALTER COLUMN stat_snitch_catches SET NOT NULL`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_bludger_hits SET NOT NULL`);
+    await client.query(`ALTER TABLE participants ALTER COLUMN stat_bludger_hits_to_players SET NOT NULL`);
     await client.query(`UPDATE participants SET is_judge = FALSE WHERE is_judge IS NULL`);
     await client.query(`ALTER TABLE participants ADD COLUMN IF NOT EXISTS is_bot BOOLEAN`);
     await client.query(`ALTER TABLE participants ADD COLUMN IF NOT EXISTS bot_difficulty SMALLINT`);
@@ -842,20 +853,7 @@ async function initDb() {
 }
 
 async function ensureGameStartedEffective(client, gameId, startedRaw) {
-  if (startedRaw) return true;
-  const judgeRes = await client.query(
-    "SELECT 1 FROM participants WHERE game_id = $1 AND is_judge = TRUE LIMIT 1",
-    [gameId]
-  );
-  const hasJudge = Boolean(judgeRes.rows[0]);
-  if (!hasJudge) {
-    await client.query(
-      "UPDATE games SET started = TRUE, started_at = COALESCE(started_at, NOW()), step_started_at = NOW() WHERE id = $1",
-      [gameId]
-    );
-    return true;
-  }
-  return false;
+  return Boolean(startedRaw);
 }
 
 async function forceExpireTurnsIfTimedOutClient(client, gameRow) {
@@ -1382,12 +1380,14 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const stepR = dr === 0 ? 0 : Math.sign(dr);
       const stepC = dc === 0 ? 0 : Math.sign(dc);
       let endPos = to;
+      let hitSomeone = false;
       for (let i = 1; i <= dist; i += 1) {
         const coord = rcToCoord(a.r + stepR * i, a.c + stepC * i);
         if (!coord) break;
         const hitId = occupantAnyByCoord.get(coord) || null;
         if (hitId) {
           endPos = coord;
+          hitSomeone = true;
           hitStunnedIds.add(hitId);
           await client.query(
             "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -1400,6 +1400,17 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       if (targetIdx === 1) b1Pos = endPos;
       else b2Pos = endPos;
       bludgersHitThisStep.add(targetIdx);
+
+      await client.query(
+        "UPDATE participants SET stat_bludger_hits = COALESCE(stat_bludger_hits, 0) + 1 WHERE id = $1 AND game_id = $2",
+        [p.id, gameId]
+      );
+      if (hitSomeone) {
+        await client.query(
+          "UPDATE participants SET stat_bludger_hits_to_players = COALESCE(stat_bludger_hits_to_players, 0) + 1 WHERE id = $1 AND game_id = $2",
+          [p.id, gameId]
+        );
+      }
 
       await client.query(
         "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -1838,12 +1849,14 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const stepR = dr === 0 ? 0 : Math.sign(dr);
       const stepC = dc === 0 ? 0 : Math.sign(dc);
       let endPos = to;
+      let hitSomeone = false;
       for (let i = 1; i <= dist; i += 1) {
         const coord = rcToCoord(a.r + stepR * i, a.c + stepC * i);
         if (!coord) break;
         const hitId = occupantAnyByCoordAfter.get(coord) || null;
         if (hitId) {
           endPos = coord;
+          hitSomeone = true;
           hitStunnedIds.add(hitId);
           await client.query(
             "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -1856,6 +1869,17 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       if (targetIdx === 1) b1Pos = endPos;
       else b2Pos = endPos;
       bludgersHitThisStep.add(targetIdx);
+
+      await client.query(
+        "UPDATE participants SET stat_bludger_hits = COALESCE(stat_bludger_hits, 0) + 1 WHERE id = $1 AND game_id = $2",
+        [p.id, gameId]
+      );
+      if (hitSomeone) {
+        await client.query(
+          "UPDATE participants SET stat_bludger_hits_to_players = COALESCE(stat_bludger_hits_to_players, 0) + 1 WHERE id = $1 AND game_id = $2",
+          [p.id, gameId]
+        );
+      }
 
       await client.query(
         "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -2294,6 +2318,8 @@ function buildGameResults(gameRow, participants) {
           pickups: p.stat_quaffle_pickups != null ? Number(p.stat_quaffle_pickups) : 0,
           steals: p.stat_quaffle_steals != null ? Number(p.stat_quaffle_steals) : 0,
           passes: p.stat_quaffle_passes != null ? Number(p.stat_quaffle_passes) : 0,
+          bludgerHits: p.stat_bludger_hits != null ? Number(p.stat_bludger_hits) : 0,
+          bludgerHitsToPlayers: p.stat_bludger_hits_to_players != null ? Number(p.stat_bludger_hits_to_players) : 0,
           goalsScored: goals,
           goalsSaved: saves,
           snitches: snitches,
@@ -2569,6 +2595,83 @@ async function autoEndTurnsInGame(client, gameId) {
 
 app.use(express.json({ limit: "64kb" }));
 
+//#region debug-point move-cells-inactive:collector
+const __TRAE_DEBUG_SESSION_ID = "move-cells-inactive";
+const __TRAE_DEBUG_DIR = path.join(__dirname, ".dbg");
+const __TRAE_DEBUG_LOG_FILE = path.join(__TRAE_DEBUG_DIR, `trae-debug-log-${__TRAE_DEBUG_SESSION_ID}.ndjson`);
+
+function __traeDbgCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+function __traeDbgAppend(event) {
+  try {
+    fs.mkdirSync(__TRAE_DEBUG_DIR, { recursive: true });
+    fs.appendFile(__TRAE_DEBUG_LOG_FILE, `${JSON.stringify(event)}\n`, () => {});
+  } catch {}
+}
+
+app.options("/__dbg/event", (_req, res) => {
+  __traeDbgCors(res);
+  res.status(204).end();
+});
+
+app.post("/__dbg/event", (req, res) => {
+  __traeDbgCors(res);
+  const incoming = req.body ?? null;
+  const wrapped = {
+    receivedAt: new Date().toISOString(),
+    ip: req.ip,
+    ua: req.get("user-agent") || null,
+    sessionId: __TRAE_DEBUG_SESSION_ID,
+    incoming
+  };
+  __traeDbgAppend(wrapped);
+  res.json({ ok: true });
+});
+
+app.get("/__dbg/health", (_req, res) => {
+  __traeDbgCors(res);
+  let bytes = 0;
+  try {
+    bytes = fs.statSync(__TRAE_DEBUG_LOG_FILE).size;
+  } catch {}
+  res.json({ ok: true, sessionId: __TRAE_DEBUG_SESSION_ID, logFile: __TRAE_DEBUG_LOG_FILE, bytes });
+});
+
+app.get("/__dbg/logs", (req, res) => {
+  __traeDbgCors(res);
+  const lastRaw = req.query?.last;
+  const lastN = lastRaw != null ? Number(lastRaw) : null;
+  let lines = [];
+  try {
+    const text = fs.readFileSync(__TRAE_DEBUG_LOG_FILE, "utf8");
+    lines = text.split("\n").filter(Boolean);
+  } catch {
+    lines = [];
+  }
+  if (Number.isFinite(lastN) && lastN > 0) lines = lines.slice(-Math.floor(lastN));
+  const events = [];
+  for (const line of lines) {
+    try {
+      events.push(JSON.parse(line));
+    } catch {}
+  }
+  res.json({ ok: true, count: events.length, events });
+});
+
+app.delete("/__dbg/logs", (_req, res) => {
+  __traeDbgCors(res);
+  try {
+    fs.mkdirSync(__TRAE_DEBUG_DIR, { recursive: true });
+    fs.writeFileSync(__TRAE_DEBUG_LOG_FILE, "");
+  } catch {}
+  res.json({ ok: true });
+});
+//#endregion debug-point move-cells-inactive:collector
+
 app.get("/api/health", async (_req, res) => {
   try {
     const { rows } = await pool.query("SELECT 1 AS ok");
@@ -2601,7 +2704,7 @@ app.post("/api/games", async (req, res) => {
     const code = nanoidRoom();
     try {
       await pool.query(
-        "INSERT INTO games (id, code, team_a, team_b, score_a, score_b, voice_enabled, snitch_pos, quaffle_pos, quaffle_holder_id, bludger1_pos, bludger2_pos, step_no) VALUES ($1, $2, $3, $4, 0, 0, TRUE, $5, $6, $7, $8, $9, $10)",
+        "INSERT INTO games (id, code, team_a, team_b, started, started_at, score_a, score_b, voice_enabled, snitch_pos, quaffle_pos, quaffle_holder_id, bludger1_pos, bludger2_pos, step_no) VALUES ($1, $2, $3, $4, FALSE, NULL, 0, 0, TRUE, $5, $6, $7, $8, $9, $10)",
         [id, code, teamA, teamB, snitchPos, "D7", null, "A7", "G7", 1]
       );
       return res.status(201).json({ code, gameId: id, teamA, teamB });
@@ -3260,19 +3363,12 @@ app.get("/api/games/:code/state", async (req, res) => {
   if (!game) return res.status(404).json({ error: "not_found" });
 
   const participantsRes = await pool.query(
-    "SELECT id, nickname, team, role, pos, snitch_progress, stat_quaffle_pickups, stat_quaffle_steals, stat_quaffle_passes, stat_goals_scored, stat_goals_saved, stat_snitch_catches, is_bot, bot_difficulty, is_observer, is_judge, created_at FROM participants WHERE game_id = $1 ORDER BY created_at ASC",
+    "SELECT id, nickname, team, role, pos, snitch_progress, stat_quaffle_pickups, stat_quaffle_steals, stat_quaffle_passes, stat_goals_scored, stat_goals_saved, stat_snitch_catches, stat_bludger_hits, stat_bludger_hits_to_players, is_bot, bot_difficulty, is_observer, is_judge, created_at FROM participants WHERE game_id = $1 ORDER BY created_at ASC",
     [game.id]
   );
   await expireOldDuels(game.id);
 
-  const judgePresent0 = (participantsRes.rows || []).some((p) => Boolean(p.is_judge));
-  const startedEffective0 = Boolean(game.started) || !judgePresent0;
-  if (!game.started && startedEffective0) {
-    try {
-      await pool.query("UPDATE games SET started = TRUE, started_at = COALESCE(started_at, NOW()), step_started_at = NOW() WHERE id = $1", [game.id]);
-      game.started = true;
-    } catch {}
-  }
+  const startedEffective0 = Boolean(game.started);
 
   const turnsExpired =
     startedEffective0 && !Boolean(game.finished) && !Boolean(game.paused) ? await expireOldTurns(game.id) : { changed: false };
@@ -3297,7 +3393,7 @@ app.get("/api/games/:code/state", async (req, res) => {
     Object.assign(game, nextGame);
 
     const participantsRes2 = await pool.query(
-      "SELECT id, nickname, team, role, pos, snitch_progress, stat_quaffle_pickups, stat_quaffle_steals, stat_quaffle_passes, stat_goals_scored, stat_goals_saved, stat_snitch_catches, is_bot, bot_difficulty, is_observer, is_judge, created_at FROM participants WHERE game_id = $1 ORDER BY created_at ASC",
+      "SELECT id, nickname, team, role, pos, snitch_progress, stat_quaffle_pickups, stat_quaffle_steals, stat_quaffle_passes, stat_goals_scored, stat_goals_saved, stat_snitch_catches, stat_bludger_hits, stat_bludger_hits_to_players, is_bot, bot_difficulty, is_observer, is_judge, created_at FROM participants WHERE game_id = $1 ORDER BY created_at ASC",
       [game.id]
     );
     participantsRes.rows = participantsRes2.rows;
@@ -3405,8 +3501,7 @@ app.get("/api/games/:code/state", async (req, res) => {
     turnStates[r.participant_id] = base;
   }
 
-  const judgePresent = (participantsRes.rows || []).some((p) => Boolean(p.is_judge));
-  const startedEffective = Boolean(game.started) || !judgePresent;
+  const startedEffective = Boolean(game.started);
   const finished = Boolean(game.finished);
   const results = finished ? buildGameResults(game, participantsRes.rows) : null;
 
@@ -3592,7 +3687,7 @@ app.post("/api/participants/:id/voice/send", async (req, res) => {
   } catch {
     return res.status(400).json({ error: "invalid_payload" });
   }
-  if (payloadSize > 12_000) return res.status(413).json({ error: "payload_too_large" });
+  if (payloadSize > 200_000) return res.status(413).json({ error: "payload_too_large" });
 
   const fromRes = await pool.query(
     `
@@ -4502,7 +4597,7 @@ app.post("/api/participants/:id/game/start", async (req, res) => {
     await client.query("BEGIN");
     const pRes = await client.query(
       `
-        SELECT p.id, p.game_id, p.is_judge,
+        SELECT p.id, p.game_id, p.is_judge, p.is_observer,
                g.started, g.finished
         FROM participants p
         JOIN games g ON g.id = p.game_id
@@ -4520,9 +4615,18 @@ app.post("/api/participants/:id/game/start", async (req, res) => {
       await client.query("ROLLBACK");
       return res.status(403).json({ error: "game_finished" });
     }
-    if (!p.is_judge) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ error: "not_judge" });
+    const judgeRes = await client.query("SELECT 1 FROM participants WHERE game_id = $1 AND is_judge = TRUE LIMIT 1", [p.game_id]);
+    const hasJudge = Boolean(judgeRes.rows[0]);
+    if (hasJudge) {
+      if (!p.is_judge) {
+        await client.query("ROLLBACK");
+        return res.status(403).json({ error: "not_judge" });
+      }
+    } else {
+      if (Boolean(p.is_observer)) {
+        await client.query("ROLLBACK");
+        return res.status(403).json({ error: "observer_cannot_start" });
+      }
     }
 
     if (!p.started) {

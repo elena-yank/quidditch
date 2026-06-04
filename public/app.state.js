@@ -49,6 +49,38 @@ const GOALS_LEFT_SET = new Set(GOALS_LEFT);
 const GOALS_RIGHT_SET = new Set(GOALS_RIGHT);
 const GOALS_ALL_SET = new Set([...GOALS_LEFT, ...GOALS_RIGHT]);
 
+//#region debug-point move-cells-inactive:reporter
+const __TRAE_DEBUG_SESSION_ID = "move-cells-inactive";
+function __traeDebugEnabled() {
+  try {
+    const qs = typeof location === "object" && location && typeof location.search === "string" ? location.search : "";
+    if (qs.includes("dbg=1") || qs.includes("traeDbg=1")) return true;
+    return localStorage.getItem("kw.traeDbg") === "1";
+  } catch {
+    return false;
+  }
+}
+
+async function __traeDebugEvent(payload) {
+  if (!__traeDebugEnabled()) return;
+  const body = {
+    ts: Date.now(),
+    sessionId: __TRAE_DEBUG_SESSION_ID,
+    payload: payload ?? null
+  };
+  try {
+    const url = "/__dbg/event";
+    const data = JSON.stringify(body);
+    if (navigator && typeof navigator.sendBeacon === "function") {
+      const blob = new Blob([data], { type: "application/json" });
+      navigator.sendBeacon(url, blob);
+      return;
+    }
+    await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: data, keepalive: true });
+  } catch {}
+}
+//#endregion debug-point move-cells-inactive:reporter
+
 function normalizeCoord(input) {
   const v = String(input || "").trim().toUpperCase();
   if (!/^[A-G](?:[1-9]|1[0-3])$/.test(v)) return null;

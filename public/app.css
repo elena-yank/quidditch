@@ -571,6 +571,10 @@ button:disabled {
   line-height: 1.35;
 }
 
+.startOverlayCard button {
+  margin-top: 12px;
+}
+
 button.primary {
   border-color: rgba(126, 208, 141, 0.55);
   box-shadow: 0 0 0 3px rgba(126, 208, 141, 0.12);

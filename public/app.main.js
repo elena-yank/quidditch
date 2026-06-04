@@ -19,6 +19,53 @@ async function refreshRoomOnce() {
   }
   const prev = state.gameState;
   const next = res.body;
+//#region debug-point move-cells-inactive:refreshRoomOnce
+  try {
+    const prevStepNo = prev?.game?.stepNo ?? null;
+    const nextStepNo = next?.game?.stepNo ?? null;
+    if (prevStepNo !== nextStepNo) {
+      __traeDebugEvent({
+        kind: "state.stepChange",
+        room: String(next?.game?.code || state.roomCode || ""),
+        me: state.session?.participantId || null,
+        prevStepNo,
+        nextStepNo,
+        draft: {
+          to: normalizeCoord(state.draft?.to),
+          actionType: state.draft?.actionType || null,
+          actionTo: normalizeCoord(state.draft?.actionTo),
+          actionBludger: state.draft?.actionBludger ?? null
+        }
+      });
+    }
+  } catch {}
+//#endregion debug-point move-cells-inactive:refreshRoomOnce
+
+//#region debug-point move-cells-inactive:draft-sync
+  try {
+    const myId = state.session?.participantId || null;
+    const prevStepNo = prev?.game?.stepNo ?? null;
+    const nextStepNo = next?.game?.stepNo ?? null;
+    const myTs = myId && next?.turnStates ? next.turnStates[myId] : null;
+
+    if (prevStepNo !== nextStepNo) {
+      state.draft = { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null };
+    } else if (myTs?.ended || myTs?.stunned) {
+      state.draft = { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null };
+    } else {
+      if (myTs?.moved && state.draft?.to) {
+        state.draft.to = null;
+        state.draft.movePickedAt = null;
+      }
+      if (myTs?.actionReserved && state.draft?.actionType) {
+        state.draft.actionType = null;
+        state.draft.actionPickedAt = null;
+        state.draft.actionTo = null;
+        state.draft.actionBludger = null;
+      }
+    }
+  } catch {}
+//#endregion debug-point move-cells-inactive:draft-sync
   if (!prev) {
     state.seenEventIds = new Set((Array.isArray(next?.events) ? next.events : []).map((e) => e?.id).filter(Boolean));
   } else {
@@ -267,6 +314,9 @@ function voiceClosePeer(peerId) {
   if (!peer) return;
   state.voice.peers.delete(peerId);
   try {
+    if (peer.disconnectTimer) clearTimeout(peer.disconnectTimer);
+  } catch {}
+  try {
     if (peer.audioEl) peer.audioEl.remove();
   } catch {}
   try {
@@ -293,7 +343,11 @@ async function voiceMaybeOffer(peer) {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     const out = pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription;
-    await api.voiceSend(state.session.participantId, { toId: peer.peerId, kind: "offer", payload: out });
+    const sendRes = await api.voiceSend(state.session.participantId, { toId: peer.peerId, kind: "offer", payload: out });
+    if (!sendRes?.ok) {
+      __traeDebugEvent?.({ kind: "voice_send_failed", phase: "offer", status: sendRes?.status, body: sendRes?.body });
+      throw new Error("voice_send_failed");
+    }
   } catch {} finally {
     peer.makingOffer = false;
   }
@@ -313,16 +367,26 @@ function voiceEnsurePeer(peerId) {
   audioEl.autoplay = true;
   audioEl.playsInline = true;
   audioEl.muted = Boolean(state.voice.speakerMuted) || !Boolean(state.voice.audioUnlocked);
-  audioEl.style.display = "none";
+  audioEl.style.position = "absolute";
+  audioEl.style.left = "-9999px";
+  audioEl.style.width = "1px";
+  audioEl.style.height = "1px";
+  audioEl.style.opacity = "0";
+  audioEl.style.pointerEvents = "none";
   document.body.appendChild(audioEl);
 
-  const peer = { peerId, pc, audioEl, audioTransceiver, isInitiator, makingOffer: false, pendingIce: [] };
+  const peer = { peerId, pc, audioEl, audioTransceiver, isInitiator, makingOffer: false, pendingIce: [], disconnectTimer: null };
   state.voice.peers.set(peerId, peer);
 
   pc.onicecandidate = (e) => {
     if (!e?.candidate) return;
     const out = e.candidate?.toJSON ? e.candidate.toJSON() : e.candidate;
-    api.voiceSend(myId, { toId: peerId, kind: "ice", payload: out }).catch(() => {});
+    api
+      .voiceSend(myId, { toId: peerId, kind: "ice", payload: out })
+      .then((r) => {
+        if (!r?.ok) __traeDebugEvent?.({ kind: "voice_send_failed", phase: "ice", status: r?.status, body: r?.body });
+      })
+      .catch(() => {});
   };
   pc.ontrack = (e) => {
     const stream = e.streams?.[0] || null;
@@ -333,8 +397,20 @@ function voiceEnsurePeer(peerId) {
   };
   pc.onconnectionstatechange = () => {
     const st = pc.connectionState;
-    if (st === "failed" || st === "disconnected" || st === "closed") {
-      voiceClosePeer(peerId);
+    if (st === "failed" || st === "closed") return voiceClosePeer(peerId);
+    if (st === "connected") {
+      if (peer.disconnectTimer) clearTimeout(peer.disconnectTimer);
+      peer.disconnectTimer = null;
+      return;
+    }
+    if (st === "disconnected") {
+      if (peer.disconnectTimer) return;
+      peer.disconnectTimer = setTimeout(() => {
+        peer.disconnectTimer = null;
+        try {
+          if (pc.connectionState === "disconnected") voiceClosePeer(peerId);
+        } catch {}
+      }, 12000);
     }
   };
 
@@ -369,7 +445,11 @@ async function voiceHandleSignal(signal) {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       const out = pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription;
-      await api.voiceSend(myId, { toId: fromId, kind: "answer", payload: out });
+      const sendRes = await api.voiceSend(myId, { toId: fromId, kind: "answer", payload: out });
+      if (!sendRes?.ok) {
+        __traeDebugEvent?.({ kind: "voice_send_failed", phase: "answer", status: sendRes?.status, body: sendRes?.body });
+        throw new Error("voice_send_failed");
+      }
     } catch {}
     return;
   }
@@ -974,6 +1054,7 @@ async function bootstrap() {
       const res = await api.startGame(id);
       if (!res.ok) {
         if (res.status === 403 && res.body?.error === "not_judge") showToast("Только судья может начать игру");
+        else if (res.status === 403 && res.body?.error === "observer_cannot_start") showToast("Наблюдатель не может начать игру");
         else if (res.status === 403 && res.body?.error === "game_finished") showToast("Игра уже завершена");
         else showToast("Не удалось начать игру");
         await refreshRoomOnce();

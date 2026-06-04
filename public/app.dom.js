@@ -31,6 +31,8 @@ const els = {
   board: $("board"),
   pitch: $("pitch"),
   startOverlay: $("startOverlay"),
+  startOverlayTitle: $("startOverlayTitle"),
+  startOverlayText: $("startOverlayText"),
   stepStatus: $("stepStatus"),
   turnTimerStatus: $("turnTimerStatus"),
   exportLogsBtn: $("exportLogsBtn"),

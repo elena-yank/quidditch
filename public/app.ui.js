@@ -1199,16 +1199,45 @@ function renderPieces(gameState) {
         if (myPlanned) reserved.delete(myPlanned);
         const alreadyMovedInDraft = !!state.draft?.to;
         const alreadyHasActionInDraft = !!state.draft?.actionType && state.draft.actionType !== "steal";
+        const shouldHighlightMove = !movedAlready && !alreadyMovedInDraft && !alreadyHasActionInDraft;
         if (isKeeperRole(me.role)) {
           const ownGoals = me.team === gameState.game.teamA ? GOALS_LEFT_SET : (me.team === gameState.game.teamB ? GOALS_RIGHT_SET : null);
-          if (!movedAlready && !alreadyMovedInDraft && !alreadyHasActionInDraft) {
+          if (shouldHighlightMove) {
             const moves = possibleMovesKeeper(from, ownGoals);
             for (const coord of moves) {
               if (!reserved.has(coord)) continue;
               const cell = els.board.querySelector(`[data-coord='${coord}']`);
               if (cell) cell.classList.add("blocked");
             }
-            highlightTargets(from, moves, occupiedNow, reserved.size ? reserved : null);
+            const forbidden = reserved.size ? reserved : null;
+            highlightTargets(from, moves, occupiedNow, forbidden);
+//#region debug-point move-cells-inactive:highlight-keeper
+            try {
+              const targetCount = els.board.querySelectorAll(".cell.target").length;
+              if (targetCount === 0) {
+                const reasons = [];
+                for (const c of moves) {
+                  let reason = "ok";
+                  if (occupiedNow.has(c)) reason = "occupied";
+                  else if (forbidden && forbidden.has(c)) reason = "forbidden";
+                  if (reasons.length < 30) reasons.push({ coord: c, reason });
+                }
+                __traeDebugEvent({
+                  kind: "ui.noMoveTargets",
+                  role: me.role,
+                  stepNo: gameState?.game?.stepNo ?? null,
+                  from,
+                  movedAlready,
+                  turnEnded,
+                  draft: { to: normalizeCoord(state.draft?.to), actionType: state.draft?.actionType || null, actionTo: normalizeCoord(state.draft?.actionTo) },
+                  reservedCount: reserved.size,
+                  occupiedCount: occupiedNow.size,
+                  movesCount: moves.length,
+                  reasons
+                });
+              }
+            } catch {}
+//#endregion debug-point move-cells-inactive:highlight-keeper
           }
           const hasQuaffle = quaffleHolderId === me.id;
           if (hasQuaffle && !actionReserved && state.draft?.actionType !== "hit_bludger") {
@@ -1223,7 +1252,7 @@ function renderPieces(gameState) {
             }
           }
         } else if (isSeekerRole(me.role)) {
-          if (!movedAlready && !alreadyMovedInDraft && !alreadyHasActionInDraft) {
+          if (shouldHighlightMove) {
             const moves = possibleMovesSeeker(from);
             for (const coord of moves) {
               if (!reserved.has(coord)) continue;
@@ -1232,9 +1261,36 @@ function renderPieces(gameState) {
             }
             const forbidden = new Set([...GOALS_ALL_SET, ...reserved]);
             highlightTargets(from, moves, occupiedNow, forbidden);
+//#region debug-point move-cells-inactive:highlight-seeker
+            try {
+              const targetCount = els.board.querySelectorAll(".cell.target").length;
+              if (targetCount === 0) {
+                const reasons = [];
+                for (const c of moves) {
+                  let reason = "ok";
+                  if (occupiedNow.has(c)) reason = "occupied";
+                  else if (forbidden.has(c)) reason = "forbidden";
+                  if (reasons.length < 30) reasons.push({ coord: c, reason });
+                }
+                __traeDebugEvent({
+                  kind: "ui.noMoveTargets",
+                  role: me.role,
+                  stepNo: gameState?.game?.stepNo ?? null,
+                  from,
+                  movedAlready,
+                  turnEnded,
+                  draft: { to: normalizeCoord(state.draft?.to), actionType: state.draft?.actionType || null, actionTo: normalizeCoord(state.draft?.actionTo) },
+                  reservedCount: reserved.size,
+                  occupiedCount: occupiedNow.size,
+                  movesCount: moves.length,
+                  reasons
+                });
+              }
+            } catch {}
+//#endregion debug-point move-cells-inactive:highlight-seeker
           }
         } else {
-          if (!movedAlready && !alreadyMovedInDraft && !alreadyHasActionInDraft) {
+          if (shouldHighlightMove) {
             const moves = possibleMovesChaser(from);
             for (const coord of moves) {
               if (!reserved.has(coord)) continue;
@@ -1243,6 +1299,33 @@ function renderPieces(gameState) {
             }
             const forbidden = new Set([...GOALS_ALL_SET, ...reserved]);
             highlightTargets(from, moves, occupiedNow, forbidden);
+//#region debug-point move-cells-inactive:highlight-chaser
+            try {
+              const targetCount = els.board.querySelectorAll(".cell.target").length;
+              if (targetCount === 0) {
+                const reasons = [];
+                for (const c of moves) {
+                  let reason = "ok";
+                  if (occupiedNow.has(c)) reason = "occupied";
+                  else if (forbidden.has(c)) reason = "forbidden";
+                  if (reasons.length < 30) reasons.push({ coord: c, reason });
+                }
+                __traeDebugEvent({
+                  kind: "ui.noMoveTargets",
+                  role: me.role,
+                  stepNo: gameState?.game?.stepNo ?? null,
+                  from,
+                  movedAlready,
+                  turnEnded,
+                  draft: { to: normalizeCoord(state.draft?.to), actionType: state.draft?.actionType || null, actionTo: normalizeCoord(state.draft?.actionTo) },
+                  reservedCount: reserved.size,
+                  occupiedCount: occupiedNow.size,
+                  movesCount: moves.length,
+                  reasons
+                });
+              }
+            } catch {}
+//#endregion debug-point move-cells-inactive:highlight-chaser
           }
           if (isBeaterRole(me.role) && !actionReserved && state.draft?.actionType === "hit_bludger") {
             const arr = Array.isArray(gameState.bludgers) ? gameState.bludgers : [];
@@ -1497,7 +1580,21 @@ function renderResults(gameState) {
   table.className = "resultsTable";
   const thead = document.createElement("thead");
   thead.appendChild(
-    makeRow(["Имя", "Роль", "Взято квоффлов", "Украдено квоффлов", "Пасы", "Поймано голов", "Поймано снитчей", "Очки"], true)
+    makeRow(
+      [
+        "Имя",
+        "Роль",
+        "Взято квоффлов",
+        "Украдено квоффлов",
+        "Пасы",
+        "Удары по бладжеру",
+        "Попаданий бладжером",
+        "Поймано голов",
+        "Поймано снитчей",
+        "Очки"
+      ],
+      true
+    )
   );
   table.appendChild(thead);
   const tbody = document.createElement("tbody");
@@ -1506,7 +1603,7 @@ function renderResults(gameState) {
     const teamRow = document.createElement("tr");
     teamRow.className = "resultsTeamRow";
     const td = document.createElement("td");
-    td.colSpan = 8;
+    td.colSpan = 10;
     td.textContent = teamLabel(teamKey);
     teamRow.appendChild(td);
     tbody.appendChild(teamRow);
@@ -1519,6 +1616,8 @@ function renderResults(gameState) {
           String(p?.stats?.pickups ?? 0),
           String(p?.stats?.steals ?? 0),
           String(p?.stats?.passes ?? 0),
+          String(p?.stats?.bludgerHits ?? 0),
+          String(p?.stats?.bludgerHitsToPlayers ?? 0),
           String(p?.stats?.goalsSaved ?? 0),
           String(p?.stats?.snitches ?? 0),
           String(p?.stats?.points ?? 0)
@@ -2063,14 +2162,30 @@ function renderMe(gameState) {
 function updateStartLockUi(gameState, me) {
   const started = Boolean(gameState?.game?.started);
   const finished = Boolean(gameState?.game?.finished);
+  const judgePresent = (gameState?.participants || []).some((p) => Boolean(p?.is_judge));
   const isJudge = Boolean(me?.is_judge);
   const isPlayer = Boolean(me && !me.is_observer);
-  const locked = Boolean((!started && isPlayer && !isJudge) || finished);
+  const waitingStart = Boolean(!started && !finished);
+  const locked = Boolean(waitingStart || finished);
 
-  if (els.startOverlay) els.startOverlay.classList.toggle("hidden", finished ? true : !locked);
-  if (els.startGameBtn) els.startGameBtn.classList.toggle("hidden", started || !isJudge || finished);
+  if (els.startOverlay) els.startOverlay.classList.toggle("hidden", !waitingStart);
+  if (els.startOverlayTitle) {
+    els.startOverlayTitle.textContent = judgePresent ? "Ожидается начало игры" : "Готовы играть?";
+  }
+  if (els.startOverlayText) {
+    els.startOverlayText.textContent = judgePresent
+      ? "Пока судья не нажмёт «Начать игру», ходы недоступны."
+      : "Когда подключатся все ожидаемые игроки, нажмите «Начинаем!» — игра начнётся для всех в комнате.";
+  }
+  const canStart = waitingStart && (judgePresent ? isJudge : isPlayer);
+  if (els.startGameBtn) {
+    els.startGameBtn.textContent = judgePresent ? "Начать игру" : "Начинаем!";
+    els.startGameBtn.disabled = !canStart;
+    els.startGameBtn.classList.toggle("hidden", !canStart);
+  }
 
   if (locked) {
+    els.pauseBtn.disabled = true;
     els.pickupQuaffleBtn.disabled = true;
     els.stealQuaffleBtn.disabled = true;
     els.passQuaffleBtn.disabled = true;

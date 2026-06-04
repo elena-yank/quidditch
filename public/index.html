@@ -243,8 +243,9 @@
               </div>
               <div class="startOverlay hidden" id="startOverlay">
                 <div class="startOverlayCard">
-                  <div class="startOverlayTitle">Ожидается начало игры</div>
-                  <div class="startOverlayText">Пока судья не нажмёт «Начать игру», ходы недоступны.</div>
+                  <div class="startOverlayTitle" id="startOverlayTitle">Ожидается начало игры</div>
+                  <div class="startOverlayText" id="startOverlayText">Пока судья не нажмёт «Начать игру», ходы недоступны.</div>
+                  <button id="startGameBtn" class="primary hidden" type="button">Начать игру</button>
                 </div>
               </div>
             </div>
@@ -261,7 +262,6 @@
                   <div id="stealLockedMessage" class="stealLockedMessage hidden">Нельзя выхватить квоффл сразу после смены владельца</div>
                   <button id="passQuaffleBtn" disabled>Дать пас</button>
                   <button id="hitBludgerBtn" disabled>Ударить бладжер</button>
-                  <button id="startGameBtn" class="primary hidden" type="button">Начать игру</button>
                   <button id="endTurnBtn">Завершить ход</button>
                 </div>
               </div>
