@@ -50,7 +50,7 @@ const GOALS_RIGHT_SET = new Set(GOALS_RIGHT);
 const GOALS_ALL_SET = new Set([...GOALS_LEFT, ...GOALS_RIGHT]);
 
 //#region debug-point move-cells-inactive:reporter
-const __TRAE_DEBUG_SESSION_ID = "move-cells-inactive";
+const __TRAE_DEBUG_SESSION_ID = "voice-chat-silent";
 function __traeDebugEnabled() {
   try {
     const qs = typeof location === "object" && location && typeof location.search === "string" ? location.search : "";
@@ -66,6 +66,10 @@ async function __traeDebugEvent(payload) {
   const body = {
     ts: Date.now(),
     sessionId: __TRAE_DEBUG_SESSION_ID,
+    client: {
+      participantId: state.session?.participantId || null,
+      roomCode: state.roomCode || null
+    },
     payload: payload ?? null
   };
   try {

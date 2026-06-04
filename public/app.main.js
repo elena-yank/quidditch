@@ -94,6 +94,7 @@ let voiceControlsHomeNextSibling = null;
 let themeToggleHomeParent = null;
 let themeToggleHomeNextSibling = null;
 let voiceAutoUnlockInstalled = false;
+let voiceApiNotFoundHandled = false;
 
 const VOICE_SVG = {
   mic: `
@@ -234,79 +235,12 @@ function voiceInstallAutoUnlock() {
   document.addEventListener("keydown", unlock);
 }
 
-async function voiceAddIceCandidate(peer, payload) {
-  if (!peer?.pc || peer.pc.connectionState === "closed") return;
-  if (!payload) return;
-  const pc = peer.pc;
-  const hasRemote = Boolean(pc.remoteDescription && pc.remoteDescription.type);
-  if (!hasRemote) {
-    if (!Array.isArray(peer.pendingIce)) peer.pendingIce = [];
-    peer.pendingIce.push(payload);
-    return;
-  }
-  try {
-    await pc.addIceCandidate(payload);
-  } catch {}
-}
-
-async function voiceFlushIce(peer) {
-  if (!peer?.pc || peer.pc.connectionState === "closed") return;
-  const pc = peer.pc;
-  const hasRemote = Boolean(pc.remoteDescription && pc.remoteDescription.type);
-  if (!hasRemote) return;
-  const pending = Array.isArray(peer.pendingIce) ? peer.pendingIce : [];
-  peer.pendingIce = [];
-  for (const c of pending) {
-    try {
-      if (c) await pc.addIceCandidate(c);
-    } catch {}
-  }
-}
-
-async function voiceEnsureLocalStream() {
-  if (state.voice.localStream) return state.voice.localStream;
-  if (!navigator.mediaDevices?.getUserMedia) throw new Error("getUserMedia_unavailable");
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  state.voice.localStream = stream;
-  return stream;
-}
-
-async function voiceAttachLocalTrackToPeer(peer) {
-  if (!peer?.pc || peer.pc.connectionState === "closed") return;
-  if (!peer.audioTransceiver) return;
-  if (state.voice.micMuted) {
-    try {
-      await peer.audioTransceiver.sender.replaceTrack(null);
-    } catch {}
-    return;
-  }
-  const stream = await voiceEnsureLocalStream();
-  const track = stream.getAudioTracks?.()[0] || null;
-  if (!track) return;
-  try {
-    await peer.audioTransceiver.sender.replaceTrack(track);
-  } catch {}
-}
-
-function voiceStopLocalStream() {
-  const s = state.voice.localStream;
-  state.voice.localStream = null;
-  if (!s) return;
-  try {
-    for (const t of s.getTracks()) t.stop();
-  } catch {}
-}
-
-async function voiceSetMicMuted(nextMuted) {
-  const next = Boolean(nextMuted);
-  state.voice.micMuted = next;
-  if (next) voiceStopLocalStream();
-  for (const peer of state.voice.peers.values()) {
-    await voiceAttachLocalTrackToPeer(peer);
-  }
-  for (const peer of state.voice.peers.values()) {
-    if (peer?.isInitiator) voiceMaybeOffer(peer).catch(() => {});
-  }
+function voiceHandleNotFoundOnce() {
+  if (voiceApiNotFoundHandled) return;
+  voiceApiNotFoundHandled = true;
+  showToast("Сессия устарела — перезайди в комнату");
+  clearSession();
+  goHome().catch(() => {});
 }
 
 function voiceClosePeer(peerId) {
@@ -324,6 +258,15 @@ function voiceClosePeer(peerId) {
   } catch {}
 }
 
+function voiceStopLocalStream() {
+  const s = state.voice.localStream;
+  state.voice.localStream = null;
+  if (!s) return;
+  try {
+    for (const t of s.getTracks()) t.stop();
+  } catch {}
+}
+
 function voiceStopAll() {
   if (state.voice.pollInterval) clearInterval(state.voice.pollInterval);
   state.voice.pollInterval = null;
@@ -332,25 +275,12 @@ function voiceStopAll() {
   state.voice.lastSeq = 0;
 }
 
-async function voiceMaybeOffer(peer) {
-  if (!peer?.pc) return;
-  if (!peer.isInitiator) return;
-  const pc = peer.pc;
-  if (peer.makingOffer) return;
-  if (pc.signalingState !== "stable") return;
-  peer.makingOffer = true;
-  try {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    const out = pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription;
-    const sendRes = await api.voiceSend(state.session.participantId, { toId: peer.peerId, kind: "offer", payload: out });
-    if (!sendRes?.ok) {
-      __traeDebugEvent?.({ kind: "voice_send_failed", phase: "offer", status: sendRes?.status, body: sendRes?.body });
-      throw new Error("voice_send_failed");
-    }
-  } catch {} finally {
-    peer.makingOffer = false;
-  }
+async function voiceEnsureLocalStream() {
+  if (state.voice.localStream) return state.voice.localStream;
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error("getUserMedia_unavailable");
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  state.voice.localStream = stream;
+  return stream;
 }
 
 function voiceEnsurePeer(peerId) {
@@ -360,8 +290,8 @@ function voiceEnsurePeer(peerId) {
   if (!canUseVoiceInBrowser()) return null;
 
   const pc = new RTCPeerConnection({ iceServers: VOICE_ICE_SERVERS });
-  const audioTransceiver = pc.addTransceiver("audio", { direction: "sendrecv" });
-  const isInitiator = String(myId) < String(peerId);
+  const audioTransceiver = pc.addTransceiver("audio", { direction: "recvonly" });
+  const polite = String(myId) > String(peerId);
 
   const audioEl = document.createElement("audio");
   audioEl.autoplay = true;
@@ -375,32 +305,155 @@ function voiceEnsurePeer(peerId) {
   audioEl.style.pointerEvents = "none";
   document.body.appendChild(audioEl);
 
-  const peer = { peerId, pc, audioEl, audioTransceiver, isInitiator, makingOffer: false, pendingIce: [], disconnectTimer: null };
+  const peer = { peerId, pc, audioEl, audioTransceiver, polite, makingOffer: false, needsNegotiation: false, ignoreOffer: false, pendingIce: [], disconnectTimer: null };
   state.voice.peers.set(peerId, peer);
+
+  const sendSignal = (kind, payload) => {
+    const fromId = state.session?.participantId || null;
+    if (!fromId) return Promise.resolve(null);
+    return api.voiceSend(fromId, { toId: peerId, kind, payload: payload ?? {} }).then((r) => {
+      if (r?.status === 404) voiceHandleNotFoundOnce();
+      return r;
+    });
+  };
+
+  const addIce = async (candidate) => {
+    if (!candidate) return;
+    if (peer.ignoreOffer) return;
+    const hasRemote = Boolean(pc.remoteDescription && pc.remoteDescription.type);
+    if (!hasRemote) {
+      if (!Array.isArray(peer.pendingIce)) peer.pendingIce = [];
+      peer.pendingIce.push(candidate);
+      return;
+    }
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch {}
+  };
+
+  const flushIce = async () => {
+    const hasRemote = Boolean(pc.remoteDescription && pc.remoteDescription.type);
+    if (!hasRemote) return;
+    const pending = Array.isArray(peer.pendingIce) ? peer.pendingIce : [];
+    peer.pendingIce = [];
+    for (const c of pending) {
+      try {
+        if (c) await pc.addIceCandidate(c);
+      } catch {}
+    }
+  };
+
+  const applyLocal = async () => {
+    if (pc.connectionState === "closed") return;
+    try {
+      if (state.voice.micMuted) {
+        try {
+          peer.audioTransceiver.direction = "recvonly";
+        } catch {}
+        await peer.audioTransceiver.sender.replaceTrack(null);
+        return;
+      }
+      const stream = await voiceEnsureLocalStream();
+      const track = stream.getAudioTracks?.()[0] || null;
+      if (!track) return;
+      try {
+        track.enabled = true;
+      } catch {}
+      try {
+        peer.audioTransceiver.direction = "sendrecv";
+      } catch {}
+      await peer.audioTransceiver.sender.replaceTrack(track);
+    } catch {}
+  };
+
+  const negotiate = async () => {
+    if (pc.connectionState === "closed") return;
+    if (peer.makingOffer) return;
+    if (pc.signalingState !== "stable") {
+      peer.needsNegotiation = true;
+      return;
+    }
+    peer.needsNegotiation = false;
+    peer.makingOffer = true;
+    try {
+      await pc.setLocalDescription(await pc.createOffer());
+      const out = pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription;
+      await sendSignal("offer", out);
+    } catch {} finally {
+      peer.makingOffer = false;
+    }
+  };
+
+  pc.onnegotiationneeded = () => {
+    negotiate().catch(() => {});
+  };
+  pc.onsignalingstatechange = () => {
+    if (!peer.needsNegotiation) return;
+    if (pc.signalingState !== "stable") return;
+    negotiate().catch(() => {});
+  };
+
+  peer._voiceApplyLocal = applyLocal;
+  peer._voiceNegotiate = negotiate;
 
   pc.onicecandidate = (e) => {
     if (!e?.candidate) return;
     const out = e.candidate?.toJSON ? e.candidate.toJSON() : e.candidate;
-    api
-      .voiceSend(myId, { toId: peerId, kind: "ice", payload: out })
-      .then((r) => {
-        if (!r?.ok) __traeDebugEvent?.({ kind: "voice_send_failed", phase: "ice", status: r?.status, body: r?.body });
-      })
-      .catch(() => {});
+
+    //#region debug-point voice-chat-silent:C:ice-out
+    try {
+      const candStr = typeof out?.candidate === "string" ? out.candidate : "";
+      const candType = candStr.match(/ typ ([a-z0-9]+)/)?.[1] || null;
+      __traeDebugEvent?.({ kind: "voice_ice_out", peerId, candType, sdpMid: out?.sdpMid ?? null, sdpMLineIndex: out?.sdpMLineIndex ?? null });
+    } catch {}
+    //#endregion
+
+    sendSignal("ice", out).catch(() => {});
+  };
+  pc.onicecandidateerror = (e) => {
+    //#region debug-point voice-chat-silent:C:ice-error
+    __traeDebugEvent?.({ kind: "voice_ice_error", peerId, errorCode: e?.errorCode ?? null, text: e?.errorText ?? null });
+    //#endregion
   };
   pc.ontrack = (e) => {
     const stream = e.streams?.[0] || null;
     if (stream) audioEl.srcObject = stream;
     else audioEl.srcObject = new MediaStream([e.track]);
     audioEl.muted = Boolean(state.voice.speakerMuted) || !Boolean(state.voice.audioUnlocked);
-    audioEl.play?.().catch(() => {});
+    audioEl.play?.().catch((err) => {
+      //#region debug-point voice-chat-silent:C:audio-play-fail
+      __traeDebugEvent?.({ kind: "voice_audio_play_fail", peerId, name: err?.name || null, message: err?.message || null, muted: Boolean(audioEl.muted) });
+      //#endregion
+    });
   };
+
   pc.onconnectionstatechange = () => {
     const st = pc.connectionState;
+
+    //#region debug-point voice-chat-silent:D:pc-state
+    __traeDebugEvent?.({ kind: "voice_pc_state", peerId, state: st, ice: pc.iceConnectionState, signaling: pc.signalingState });
+    //#endregion
+
     if (st === "failed" || st === "closed") return voiceClosePeer(peerId);
     if (st === "connected") {
       if (peer.disconnectTimer) clearTimeout(peer.disconnectTimer);
       peer.disconnectTimer = null;
+
+      //#region debug-point voice-chat-silent:D:rtp-stats
+      pc.getStats
+        ?.()
+        .then((stats) => {
+          let inPackets = null;
+          let outPackets = null;
+          stats.forEach((r) => {
+            if (r?.type === "inbound-rtp" && r?.kind === "audio" && typeof r.packetsReceived === "number") inPackets = r.packetsReceived;
+            if (r?.type === "outbound-rtp" && r?.kind === "audio" && typeof r.packetsSent === "number") outPackets = r.packetsSent;
+          });
+          __traeDebugEvent?.({ kind: "voice_rtp_packets", peerId, inPackets, outPackets });
+        })
+        .catch(() => {});
+      //#endregion
+
       return;
     }
     if (st === "disconnected") {
@@ -414,8 +467,7 @@ function voiceEnsurePeer(peerId) {
     }
   };
 
-  voiceAttachLocalTrackToPeer(peer).catch(() => {});
-  voiceMaybeOffer(peer).catch(() => {});
+  applyLocal().catch(() => {});
 
   return peer;
 }
@@ -439,17 +491,46 @@ async function voiceHandleSignal(signal) {
 
   if (kind === "offer") {
     try {
+      const offerCollision = peer.makingOffer || pc.signalingState !== "stable";
+      peer.ignoreOffer = !peer.polite && offerCollision;
+      if (peer.ignoreOffer) return;
+      if (offerCollision) {
+        try {
+          await pc.setLocalDescription({ type: "rollback" });
+        } catch {}
+      }
       await pc.setRemoteDescription(payload);
-      await voiceFlushIce(peer);
-      await voiceAttachLocalTrackToPeer(peer);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
+      const pending = Array.isArray(peer.pendingIce) ? peer.pendingIce : [];
+      peer.pendingIce = [];
+      for (const c of pending) {
+        try {
+          if (c) await pc.addIceCandidate(c);
+        } catch {}
+      }
+      try {
+        if (state.voice.micMuted) {
+          try {
+            peer.audioTransceiver.direction = "recvonly";
+          } catch {}
+          await peer.audioTransceiver.sender.replaceTrack(null);
+        } else {
+          const stream = await voiceEnsureLocalStream();
+          const track = stream.getAudioTracks?.()[0] || null;
+          if (track) {
+            try {
+              track.enabled = true;
+            } catch {}
+            try {
+              peer.audioTransceiver.direction = "sendrecv";
+            } catch {}
+            await peer.audioTransceiver.sender.replaceTrack(track);
+          }
+        }
+      } catch {}
+      await pc.setLocalDescription(await pc.createAnswer());
       const out = pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription;
       const sendRes = await api.voiceSend(myId, { toId: fromId, kind: "answer", payload: out });
-      if (!sendRes?.ok) {
-        __traeDebugEvent?.({ kind: "voice_send_failed", phase: "answer", status: sendRes?.status, body: sendRes?.body });
-        throw new Error("voice_send_failed");
-      }
+      if (sendRes?.status === 404) voiceHandleNotFoundOnce();
     } catch {}
     return;
   }
@@ -457,13 +538,28 @@ async function voiceHandleSignal(signal) {
   if (kind === "answer") {
     try {
       await pc.setRemoteDescription(payload);
-      await voiceFlushIce(peer);
+      const pending = Array.isArray(peer.pendingIce) ? peer.pendingIce : [];
+      peer.pendingIce = [];
+      for (const c of pending) {
+        try {
+          if (c) await pc.addIceCandidate(c);
+        } catch {}
+      }
     } catch {}
     return;
   }
 
   if (kind === "ice") {
-    await voiceAddIceCandidate(peer, payload);
+    if (peer.ignoreOffer) return;
+    const hasRemote = Boolean(pc.remoteDescription && pc.remoteDescription.type);
+    if (!hasRemote) {
+      if (!Array.isArray(peer.pendingIce)) peer.pendingIce = [];
+      peer.pendingIce.push(payload);
+      return;
+    }
+    try {
+      await pc.addIceCandidate(payload);
+    } catch {}
   }
 }
 
@@ -471,18 +567,52 @@ async function voicePollOnce() {
   const myId = state.session?.participantId || null;
   if (!myId) return;
   const res = await api.voicePoll(myId, state.voice.lastSeq || 0);
-  if (!res.ok) return;
+  if (!res.ok) {
+    //#region debug-point voice-chat-silent:E:poll-fail
+    __traeDebugEvent?.({ kind: "voice_poll_failed", status: res?.status || null, body: res?.body || null });
+    //#endregion
+    if (res?.status === 404) voiceHandleNotFoundOnce();
+    return;
+  }
   const voiceEnabled = Boolean(res.body?.voiceEnabled);
   if (!voiceEnabled) {
+    //#region debug-point voice-chat-silent:E:voice-disabled
+    __traeDebugEvent?.({ kind: "voice_disabled_by_server" });
+    //#endregion
     voiceStopAll();
     updateVoiceUi(state.gameState);
     return;
   }
   const signals = Array.isArray(res.body?.signals) ? res.body.signals : [];
+  if (signals.length > 0) {
+    //#region debug-point voice-chat-silent:E:poll
+    const kinds = {};
+    for (const s of signals) {
+      const k = String(s?.kind || "");
+      if (!k) continue;
+      kinds[k] = (kinds[k] || 0) + 1;
+    }
+    __traeDebugEvent?.({ kind: "voice_poll", count: signals.length, kinds, lastSeq: state.voice.lastSeq || 0 });
+    //#endregion
+  }
   for (const s of signals) {
     const seq = Number(s?.seq || 0);
     if (seq > state.voice.lastSeq) state.voice.lastSeq = seq;
     await voiceHandleSignal(s);
+  }
+}
+
+async function voiceSetMicMuted(nextMuted) {
+  const next = Boolean(nextMuted);
+  state.voice.micMuted = next;
+  if (!next) await voiceEnsureLocalStream();
+  for (const peer of state.voice.peers.values()) {
+    try {
+      await peer._voiceApplyLocal?.();
+    } catch {}
+    try {
+      await peer._voiceNegotiate?.();
+    } catch {}
   }
 }
 
@@ -902,6 +1032,16 @@ async function bootstrap() {
       VOICE_ICE_SERVERS = meta.voiceIceServers;
     }
 
+    //#region debug-point voice-chat-silent:A:bootstrap
+    __traeDebugEvent?.({
+      kind: "voice_bootstrap",
+      canVoice: canUseVoiceInBrowser(),
+      secureContext: Boolean(window.isSecureContext),
+      hasGum: Boolean(navigator.mediaDevices?.getUserMedia),
+      iceServers: VOICE_ICE_SERVERS
+    });
+    //#endregion
+
     state.session = loadSession();
     await setupHome();
     await ensureBoardPitchLayoutLoaded();
@@ -1083,6 +1223,16 @@ async function bootstrap() {
       els.voiceMicBtn.addEventListener("click", async () => {
         const gs = state.gameState;
         const myId = state.session?.participantId || null;
+        //#region debug-point voice-chat-silent:A:mic-click
+        __traeDebugEvent?.({
+          kind: "voice_mic_click",
+          participantId: myId,
+          hasGameState: Boolean(gs),
+          canVoice: canUseVoiceInBrowser(),
+          voiceEnabled: Boolean(gs?.game?.voiceEnabled),
+          micMuted: Boolean(state.voice.micMuted)
+        });
+        //#endregion
         if (!myId || !gs) return;
         if (!canUseVoiceInBrowser()) return showToast("Голосовой чат не поддерживается браузером");
         if (!Boolean(gs?.game?.voiceEnabled)) return showToast("Судья отключил голосовой чат");
@@ -1093,6 +1243,9 @@ async function bootstrap() {
             await voiceSetMicMuted(false);
             showToast("Микрофон включён");
           } catch {
+            //#region debug-point voice-chat-silent:A:mic-enable-fail
+            __traeDebugEvent?.({ kind: "voice_mic_enable_fail", participantId: myId });
+            //#endregion
             state.voice.micMuted = true;
             showToast("Не удалось включить микрофон");
           }

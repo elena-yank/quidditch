@@ -2596,7 +2596,7 @@ async function autoEndTurnsInGame(client, gameId) {
 app.use(express.json({ limit: "64kb" }));
 
 //#region debug-point move-cells-inactive:collector
-const __TRAE_DEBUG_SESSION_ID = "move-cells-inactive";
+const __TRAE_DEBUG_SESSION_ID = "voice-chat-silent";
 const __TRAE_DEBUG_DIR = path.join(__dirname, ".dbg");
 const __TRAE_DEBUG_LOG_FILE = path.join(__TRAE_DEBUG_DIR, `trae-debug-log-${__TRAE_DEBUG_SESSION_ID}.ndjson`);
 
@@ -3678,7 +3678,7 @@ app.post("/api/participants/:id/voice/send", async (req, res) => {
   const payload = req.body?.payload ?? {};
   if (!toId) return res.status(400).json({ error: "invalid_to" });
 
-  const allowedKinds = new Set(["offer", "answer", "ice", "hangup"]);
+  const allowedKinds = new Set(["offer", "answer", "ice", "hangup", "renegotiate"]);
   if (!allowedKinds.has(kind)) return res.status(400).json({ error: "invalid_kind" });
 
   let payloadSize = 0;

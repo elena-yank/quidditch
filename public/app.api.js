@@ -1,3 +1,16 @@
+async function __apiParseBody(r) {
+  try {
+    return await r.json();
+  } catch {
+    try {
+      const text = await r.text();
+      return text ? { rawText: text } : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
 const api = {
   meta: () => fetch("/api/meta").then((r) => r.json()),
   health: () => fetch("/api/health").then((r) => r.json()),
@@ -85,7 +98,7 @@ const api = {
     return fetch(`/api/participants/${encodeURIComponent(participantId)}/voice/poll${q}`).then(async (r) => ({
       ok: r.ok,
       status: r.status,
-      body: await r.json()
+      body: await __apiParseBody(r)
     }));
   },
   voiceSend: (participantId, payload) =>
@@ -93,7 +106,7 @@ const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload || {})
-    }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json() })),
+    }).then(async (r) => ({ ok: r.ok, status: r.status, body: await __apiParseBody(r) })),
   judgeVoice: (judgeId, payload) =>
     fetch(`/api/judge/${encodeURIComponent(judgeId)}/voice`, {
       method: "POST",
