@@ -286,13 +286,21 @@ function isAllowedChaserMove(fromCoord, toCoord) {
 }
 
 function isAllowedKeeperMove(fromCoord, toCoord, ownGoalsSet) {
-  if (!ownGoalsSet || !ownGoalsSet.has(fromCoord) || !ownGoalsSet.has(toCoord)) return false;
-  const from = coordToRC(fromCoord);
-  const to = coordToRC(toCoord);
-  if (!from || !to) return false;
-  const dr = Math.abs(from.r - to.r);
-  const dc = Math.abs(from.c - to.c);
-  return dr + dc === 1;
+  if (!ownGoalsSet) return false;
+  const zone = new Set();
+  for (const g of ownGoalsSet) {
+    const rc = coordToRC(g);
+    if (!rc) continue;
+    for (let dr = -1; dr <= 1; dr += 1) {
+      for (let dc = -1; dc <= 1; dc += 1) {
+        const c = rcToCoord(rc.r + dr, rc.c + dc);
+        if (c) zone.add(c);
+      }
+    }
+  }
+  if (!zone.has(fromCoord) || !zone.has(toCoord)) return false;
+  const d = chebyshevDistance(fromCoord, toCoord);
+  return d === 1;
 }
 
 function isAllowedSeekerMove(fromCoord, toCoord) {
@@ -313,11 +321,14 @@ function chebyshevDistance(aCoord, bCoord) {
 }
 
 async function expireOldDuels(gameId) {
-  const stableBitFromId = (id) => {
+  const stableIndexFromId = (id, mod) => {
+    const m = Number(mod) || 0;
+    if (m <= 0) return 0;
     const s = String(id || "");
     let acc = 0;
     for (let i = 0; i < s.length; i += 1) acc = (acc + s.charCodeAt(i)) | 0;
-    return (acc & 1) === 1;
+    const n = Math.abs(acc);
+    return n % m;
   };
 
   const client = await pool.connect();
@@ -326,7 +337,7 @@ async function expireOldDuels(gameId) {
 
     const duelRes = await client.query(
       `
-        SELECT id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
+        SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
         FROM duels
         WHERE game_id = $1 AND resolved_at IS NULL
         ORDER BY started_at DESC
@@ -356,13 +367,36 @@ async function expireOldDuels(gameId) {
     }
 
     const kind = String(duel.kind || "steal").toLowerCase();
-    const bothMissing = duel.attacker_score == null && duel.defender_score == null;
-    const attackerMissing = duel.attacker_score == null;
-    const defenderMissing = duel.defender_score == null;
+    const participantIds = uniqueTextArray(duel.participant_ids || [duel.attacker_id, duel.defender_id]);
+    if (participantIds.length < 2) {
+      await client.query("COMMIT");
+      return;
+    }
+
+    await client.query(
+      `
+        INSERT INTO duel_scores (duel_id, participant_id, score)
+        SELECT $1, x, NULL
+        FROM unnest($2::text[]) x
+        ON CONFLICT DO NOTHING
+      `,
+      [duel.id, participantIds]
+    );
+
+    const scoresRes = await client.query(
+      "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[]) FOR UPDATE",
+      [duel.id, participantIds]
+    );
+    const scoreById = new Map(scoresRes.rows.map((r) => [r.participant_id, r.score]));
+    const missing = [];
+    for (const pid of participantIds) {
+      const v = scoreById.get(pid);
+      if (v == null) missing.push(pid);
+    }
 
     const participantsRes = await client.query(
       "SELECT id, is_bot, bot_difficulty FROM participants WHERE game_id = $1 AND id = ANY($2::text[])",
-      [duel.game_id, [duel.attacker_id, duel.defender_id]]
+      [duel.game_id, participantIds]
     );
     const byId = new Map(participantsRes.rows.map((r) => [r.id, r]));
     const scoreForMissing = (pid) => {
@@ -371,28 +405,30 @@ async function expireOldDuels(gameId) {
       return 0;
     };
 
-    let attackerScore = duel.attacker_score != null ? Number(duel.attacker_score) : null;
-    let defenderScore = duel.defender_score != null ? Number(duel.defender_score) : null;
-
-    if (bothMissing) {
+    if (missing.length === participantIds.length) {
       if (kind === "steal") {
-        attackerScore = 0;
-        defenderScore = 1;
+        for (const pid of participantIds) scoreById.set(pid, pid === duel.defender_id ? 1 : 0);
       } else {
-        const attackerWins = stableBitFromId(duel.id);
-        attackerScore = attackerWins ? 1 : 0;
-        defenderScore = attackerWins ? 0 : 1;
+        const winPid = participantIds[stableIndexFromId(duel.id, participantIds.length)];
+        for (const pid of participantIds) scoreById.set(pid, pid === winPid ? 1 : 0);
       }
     } else {
-      if (attackerMissing) attackerScore = scoreForMissing(duel.attacker_id);
-      if (defenderMissing) defenderScore = scoreForMissing(duel.defender_id);
+      for (const pid of missing) scoreById.set(pid, scoreForMissing(pid));
     }
 
-    if (!Number.isFinite(attackerScore)) attackerScore = 0;
-    if (!Number.isFinite(defenderScore)) defenderScore = 0;
-    attackerScore = Math.max(0, Math.min(100, Math.round(attackerScore)));
-    defenderScore = Math.max(0, Math.min(100, Math.round(defenderScore)));
+    for (const pid of participantIds) {
+      let v = scoreById.get(pid);
+      if (!Number.isFinite(Number(v))) v = 0;
+      const score = Math.max(0, Math.min(100, Math.round(Number(v))));
+      await client.query(
+        "UPDATE duel_scores SET score = COALESCE(score, $3) WHERE duel_id = $1 AND participant_id = $2",
+        [duel.id, pid, score]
+      );
+      scoreById.set(pid, score);
+    }
 
+    const attackerScore = scoreById.get(duel.attacker_id) ?? null;
+    const defenderScore = scoreById.get(duel.defender_id) ?? null;
     await client.query(
       `
         UPDATE duels
@@ -405,7 +441,7 @@ async function expireOldDuels(gameId) {
 
     const duelRes2 = await client.query(
       `
-        SELECT id, game_id, attacker_id, defender_id, kind, target_pos, attacker_score, defender_score, resolved_at, winner_id
+        SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
         FROM duels
         WHERE id = $1
         FOR UPDATE
@@ -416,9 +452,20 @@ async function expireOldDuels(gameId) {
     const resolved = await resolveDuelIfReady(client, duel2);
 
     if (!resolved.resolved) {
-      const a = attackerScore;
-      const b = defenderScore;
-      const winnerId = a >= b ? duel.attacker_id : duel.defender_id;
+      let bestScore = -Infinity;
+      let bestIds = [];
+      for (const pid of participantIds) {
+        const s = Number(scoreById.get(pid));
+        if (!Number.isFinite(s)) continue;
+        if (s > bestScore) {
+          bestScore = s;
+          bestIds = [pid];
+        } else if (s === bestScore) {
+          bestIds.push(pid);
+        }
+      }
+      bestIds.sort();
+      const winnerId = bestIds[0] || duel.defender_id || duel.attacker_id;
       await client.query(
         `
           UPDATE duels
@@ -747,6 +794,7 @@ async function initDb() {
         game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
         attacker_id TEXT NOT NULL,
         defender_id TEXT NOT NULL,
+        participant_ids TEXT[] NULL,
         kind TEXT NULL,
         target_pos TEXT NULL,
         created_step_no INTEGER NULL,
@@ -760,6 +808,34 @@ async function initDb() {
     await client.query(`ALTER TABLE duels ADD COLUMN IF NOT EXISTS kind TEXT`);
     await client.query(`ALTER TABLE duels ADD COLUMN IF NOT EXISTS target_pos TEXT`);
     await client.query(`ALTER TABLE duels ADD COLUMN IF NOT EXISTS created_step_no INTEGER`);
+    await client.query(`ALTER TABLE duels ADD COLUMN IF NOT EXISTS participant_ids TEXT[]`);
+    await client.query(`UPDATE duels SET participant_ids = ARRAY[attacker_id, defender_id] WHERE participant_ids IS NULL`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS duel_scores (
+        duel_id TEXT NOT NULL REFERENCES duels(id) ON DELETE CASCADE,
+        participant_id TEXT NOT NULL,
+        score INTEGER NULL,
+        PRIMARY KEY (duel_id, participant_id)
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS duel_scores_duel_idx ON duel_scores (duel_id)`);
+    await client.query(`
+      INSERT INTO duel_scores (duel_id, participant_id, score)
+      SELECT d.id, d.attacker_id, d.attacker_score
+      FROM duels d
+      WHERE NOT EXISTS (
+        SELECT 1 FROM duel_scores s WHERE s.duel_id = d.id AND s.participant_id = d.attacker_id
+      )
+    `);
+    await client.query(`
+      INSERT INTO duel_scores (duel_id, participant_id, score)
+      SELECT d.id, d.defender_id, d.defender_score
+      FROM duels d
+      WHERE NOT EXISTS (
+        SELECT 1 FROM duel_scores s WHERE s.duel_id = d.id AND s.participant_id = d.defender_id
+      )
+    `);
     await client.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS duels_one_active_per_game
       ON duels (game_id)
@@ -958,6 +1034,49 @@ async function ensureTurnState(client, gameId, participantId, stepNo) {
       [gameId, participantId, stepNo]
     );
   }
+}
+
+function uniqueTextArray(items) {
+  const out = [];
+  const seen = new Set();
+  for (const v of Array.isArray(items) ? items : []) {
+    const s = String(v || "").trim();
+    if (!s) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+async function insertDuelWithParticipants(client, { duelId, gameId, attackerId, defenderId, participantIds, kind, targetPos, createdStepNo }) {
+  const ids = uniqueTextArray(participantIds);
+  if (ids.length < 2) return 0;
+
+  const a = String(attackerId || ids[0] || "").trim();
+  const d = String(defenderId || ids[1] || ids[0] || "").trim();
+  if (!a || !d) return 0;
+
+  const ins = await client.query(
+    `
+      INSERT INTO duels (id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT DO NOTHING
+    `,
+    [duelId, gameId, a, d, ids, kind || null, targetPos || null, createdStepNo != null ? Number(createdStepNo) : null]
+  );
+  if (ins.rowCount > 0) {
+    await client.query(
+      `
+        INSERT INTO duel_scores (duel_id, participant_id, score)
+        SELECT $1, x, NULL
+        FROM unnest($2::text[]) x
+        ON CONFLICT DO NOTHING
+      `,
+      [duelId, ids]
+    );
+  }
+  return ins.rowCount || 0;
 }
 
 function findNearestFreeCoord(origin, occupied) {
@@ -1166,15 +1285,17 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 
     if (pickupCandidates.length >= 2) {
       const duelId = nanoidId();
-      const ins = await client.query(
-        `
-          INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
-          ON CONFLICT DO NOTHING
-        `,
-        [duelId, gameId, pickupCandidates[0], pickupCandidates[1], "pickup", qCoord, stepNo]
-      );
-      if (ins.rowCount > 0) return;
+      const insCount = await insertDuelWithParticipants(client, {
+        duelId,
+        gameId,
+        attackerId: pickupCandidates[0],
+        defenderId: pickupCandidates[1] || pickupCandidates[0],
+        participantIds: pickupCandidates,
+        kind: "pickup",
+        targetPos: qCoord,
+        createdStepNo: stepNo
+      });
+      if (insCount > 0) return;
       const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
       if (active.rows[0]) return;
     }
@@ -1205,15 +1326,17 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 
       if (defenderId) {
         const duelId = nanoidId();
-        const ins = await client.query(
-          `
-            INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT DO NOTHING
-          `,
-          [duelId, gameId, pickerId, defenderId, "pickup", qCoord, stepNo]
-        );
-        if (ins.rowCount > 0) return;
+        const insCount = await insertDuelWithParticipants(client, {
+          duelId,
+          gameId,
+          attackerId: pickerId,
+          defenderId,
+          participantIds: [pickerId, defenderId],
+          kind: "pickup",
+          targetPos: qCoord,
+          createdStepNo: stepNo
+        });
+        if (insCount > 0) return;
         const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
         if (active.rows[0]) return;
       }
@@ -1236,38 +1359,10 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     if (Boolean(p.stunned)) continue;
     const actionType = normalizePlannedActionType(p.planned_action_type);
     if (!actionType) continue;
-    const allowPreMove = Boolean(p.planned_action_first) || actionType === "steal";
+    const allowPreMove = Boolean(p.planned_action_first);
     if (!allowPreMove) continue;
     const from = actionPosById.get(p.id);
     if (!from) continue;
-
-    if (actionType === "steal") {
-      if (!isChaserRole(p.role)) continue;
-      if (!qHolderId) continue;
-      if (qHolderId === p.id) continue;
-      if (stealCooldownStepNo != null && stepNo === stealCooldownStepNo + 1) continue;
-      if (lockHolderId && lockStepNo != null && stepNo === lockStepNo + 1 && qHolderId === lockHolderId) continue;
-      const holder = participants.find((pp) => pp.id === qHolderId) || null;
-      if (!holder || holder.team === p.team) continue;
-      const holderPos = actionPosById.get(qHolderId);
-      if (!holderPos) continue;
-      const actionFirst = Boolean(p.planned_action_first);
-      const stealFrom = actionFirst ? from : (moveToByIdBeforeActions.get(p.id) || from);
-      const d = chebyshevDistance(stealFrom, holderPos);
-      if (d == null || d > 1) continue;
-      const duelId = nanoidId();
-      const ins = await client.query(
-        `
-          INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
-          VALUES ($1, $2, $3, $4, $5, NULL, $6)
-          ON CONFLICT DO NOTHING
-        `,
-        [duelId, gameId, p.id, qHolderId, "steal", stepNo]
-      );
-      if (ins.rowCount > 0) return;
-      const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
-      if (active.rows[0]) return;
-    }
 
     if (actionType === "keeper_pickup") {
       if (qHolderId) continue;
@@ -1359,15 +1454,17 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         if (!duel) {
           await client.query("ROLLBACK TO SAVEPOINT step_apply");
           const duelId = nanoidId();
-          const ins = await client.query(
-            `
-              INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
-              VALUES ($1, $2, $3, $4, $5, $6, $7)
-              ON CONFLICT DO NOTHING
-            `,
-            [duelId, gameId, contenders[0], contenders[1], "hit_bludger", duelTarget, stepNo]
-          );
-          if (ins.rowCount > 0) return;
+          const insCount = await insertDuelWithParticipants(client, {
+            duelId,
+            gameId,
+            attackerId: contenders[0],
+            defenderId: contenders[1] || contenders[0],
+            participantIds: [contenders[0], contenders[1]],
+            kind: "hit_bludger",
+            targetPos: duelTarget,
+            createdStepNo: stepNo
+          });
+          if (insCount > 0) return;
           const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
           if (active.rows[0]) return;
         } else if (duel.winner_id && p.id !== duel.winner_id) {
@@ -1617,15 +1714,17 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 
     if (pickupCandidates.length >= 2) {
       const duelId = nanoidId();
-      const ins = await client.query(
-        `
-          INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
-          ON CONFLICT DO NOTHING
-        `,
-        [duelId, gameId, pickupCandidates[0], pickupCandidates[1], "pickup", qCoord, stepNo]
-      );
-      if (ins.rowCount > 0) return;
+      const insCount = await insertDuelWithParticipants(client, {
+        duelId,
+        gameId,
+        attackerId: pickupCandidates[0],
+        defenderId: pickupCandidates[1] || pickupCandidates[0],
+        participantIds: pickupCandidates,
+        kind: "pickup",
+        targetPos: qCoord,
+        createdStepNo: stepNo
+      });
+      if (insCount > 0) return;
       const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
       if (active.rows[0]) return;
     }
@@ -1656,15 +1755,17 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 
       if (defenderId) {
         const duelId = nanoidId();
-        const ins = await client.query(
-          `
-            INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT DO NOTHING
-          `,
-          [duelId, gameId, pickerId, defenderId, "pickup", qCoord, stepNo]
-        );
-        if (ins.rowCount > 0) return;
+        const insCount = await insertDuelWithParticipants(client, {
+          duelId,
+          gameId,
+          attackerId: pickerId,
+          defenderId,
+          participantIds: [pickerId, defenderId],
+          kind: "pickup",
+          targetPos: qCoord,
+          createdStepNo: stepNo
+        });
+        if (insCount > 0) return;
         const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
         if (active.rows[0]) return;
       }
@@ -1684,38 +1785,44 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
   }
 
   if (qHolderId) {
-    const stealCandidates = [];
-    for (const p of participants) {
-      if (Boolean(p.stunned)) continue;
-      if (Boolean(p.planned_action_first)) continue;
-      const actionType = normalizePlannedActionType(p.planned_action_type);
-      if (actionType !== "steal") continue;
-      if (!isChaserRole(p.role)) continue;
-      if (qHolderId === p.id) continue;
-      if (stealCooldownStepNo != null && stepNo === stealCooldownStepNo + 1) continue;
-      if (lockHolderId && lockStepNo != null && stepNo === lockStepNo + 1 && qHolderId === lockHolderId) continue;
-      const holder = participants.find((pp) => pp.id === qHolderId) || null;
-      if (!holder || holder.team === p.team) continue;
-      const from = posById.get(p.id);
-      const holderPos = posById.get(qHolderId);
-      if (!from || !holderPos) continue;
-      const d = chebyshevDistance(from, holderPos);
-      if (d == null || d > 1) continue;
-      stealCandidates.push(p.id);
-    }
-    if (stealCandidates.length > 0) {
-      const duelId = nanoidId();
-      const ins = await client.query(
-        `
-          INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
-          VALUES ($1, $2, $3, $4, $5, NULL, $6)
-          ON CONFLICT DO NOTHING
-        `,
-        [duelId, gameId, stealCandidates[0], qHolderId, "steal", stepNo]
-      );
-      if (ins.rowCount > 0) return;
-      const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
-      if (active.rows[0]) return;
+    const holder = participants.find((pp) => pp.id === qHolderId) || null;
+    if (holder && isChaserRole(holder.role)) {
+      const holderPosPre = actionPosById.get(qHolderId) || null;
+      const holderPosPost = posById.get(qHolderId) || null;
+      const stealCandidates = [];
+      for (const p of participants) {
+        if (Boolean(p.stunned)) continue;
+        const actionType = normalizePlannedActionType(p.planned_action_type);
+        if (actionType !== "steal") continue;
+        if (!isChaserRole(p.role) && !isKeeperRole(p.role)) continue;
+        if (qHolderId === p.id) continue;
+        if (stealCooldownStepNo != null && stepNo === stealCooldownStepNo + 1) continue;
+        if (lockHolderId && lockStepNo != null && stepNo === lockStepNo + 1 && qHolderId === lockHolderId) continue;
+        if (holder.team === p.team) continue;
+        const actionFirst = Boolean(p.planned_action_first);
+        const from = actionFirst ? actionPosById.get(p.id) : posById.get(p.id);
+        const holderPos = actionFirst ? holderPosPre : holderPosPost;
+        if (!from || !holderPos) continue;
+        const d = chebyshevDistance(from, holderPos);
+        if (d == null || d > 1) continue;
+        stealCandidates.push(p.id);
+      }
+      if (stealCandidates.length > 0) {
+        const duelId = nanoidId();
+        const insCount = await insertDuelWithParticipants(client, {
+          duelId,
+          gameId,
+          attackerId: stealCandidates[0],
+          defenderId: qHolderId,
+          participantIds: [qHolderId, ...stealCandidates],
+          kind: "steal",
+          targetPos: null,
+          createdStepNo: stepNo
+        });
+        if (insCount > 0) return;
+        const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
+        if (active.rows[0]) return;
+      }
     }
   }
 
@@ -1828,15 +1935,17 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         if (!duel) {
           await client.query("ROLLBACK TO SAVEPOINT step_apply");
           const duelId = nanoidId();
-          const ins = await client.query(
-            `
-              INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
-              VALUES ($1, $2, $3, $4, $5, $6, $7)
-              ON CONFLICT DO NOTHING
-            `,
-            [duelId, gameId, contenders[0], contenders[1], "hit_bludger", duelTarget, stepNo]
-          );
-          if (ins.rowCount > 0) return;
+          const insCount = await insertDuelWithParticipants(client, {
+            duelId,
+            gameId,
+            attackerId: contenders[0],
+            defenderId: contenders[1] || contenders[0],
+            participantIds: [contenders[0], contenders[1]],
+            kind: "hit_bludger",
+            targetPos: duelTarget,
+            createdStepNo: stepNo
+          });
+          if (insCount > 0) return;
           const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [gameId]);
           if (active.rows[0]) return;
         } else if (duel.winner_id && p.id !== duel.winner_id) {
@@ -2020,15 +2129,17 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const duelId = nanoidId();
       const a = reachers[0].id;
       const b = reachers[1].id;
-      const ins = await client.query(
-        `
-          INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
-          ON CONFLICT DO NOTHING
-        `,
-        [duelId, gameId, a, b, "snitch", snitchPos, stepNo]
-      );
-      if (ins.rowCount > 0) {
+      const insCount = await insertDuelWithParticipants(client, {
+        duelId,
+        gameId,
+        attackerId: a,
+        defenderId: b,
+        participantIds: [a, b],
+        kind: "snitch",
+        targetPos: snitchPos,
+        createdStepNo: stepNo
+      });
+      if (insCount > 0) {
         await client.query("UPDATE participants SET snitch_progress = 100 WHERE game_id = $1 AND id = ANY($2::text[])", [gameId, [a, b]]);
         return;
       }
@@ -2379,8 +2490,18 @@ function hasAnyLegalMove({ participant, from, occupied, game }) {
     const isTeamB = participant.team === game.team_b;
     if (!isTeamA && !isTeamB) return false;
     const ownGoals = isTeamA ? GOALS_LEFT_SET : GOALS_RIGHT_SET;
-    for (const to of ALL_COORDS) {
-      if (!ownGoals.has(to)) continue;
+    const zone = new Set();
+    for (const g of ownGoals) {
+      const rc = coordToRC(g);
+      if (!rc) continue;
+      for (let dr = -1; dr <= 1; dr += 1) {
+        for (let dc = -1; dc <= 1; dc += 1) {
+          const c = rcToCoord(rc.r + dr, rc.c + dc);
+          if (c) zone.add(c);
+        }
+      }
+    }
+    for (const to of zone) {
       if (occupied.has(to)) continue;
       if (isAllowedKeeperMove(from, to, ownGoals)) return true;
     }
@@ -2431,6 +2552,43 @@ async function canChaserSteal({ client, from, participant, game, tsById }) {
   if (!holder || holder.is_observer) return false;
   if (!isChaserRole(holder.role) && !isKeeperRole(holder.role)) return false;
   if (isKeeperRole(holder.role)) return false;
+  if (holder.team === participant.team) return false;
+
+  const holderPos =
+    getPositionForParticipant(holder, game) ||
+    defaultSpawnCoord({ role: holder.role, team: holder.team, teamA: game.team_a, teamB: game.team_b });
+  if (!holderPos) return false;
+
+  const d = chebyshevDistance(from, holderPos);
+  if (d == null || d > 1) return false;
+
+  const holderTs = tsById.get(holderId);
+  if (!holderTs) return false;
+  if (holderTs.ended) return false;
+  if (holderTs.action_reserved) return false;
+
+  return true;
+}
+
+async function canKeeperSteal({ client, from, participant, game, tsById }) {
+  const holderId = game.quaffle_holder_id;
+  if (!holderId) return false;
+  if (holderId === participant.id) return false;
+
+  const lockHolderId = game.quaffle_lock_holder_id || null;
+  const lockStepNo = game.quaffle_lock_step_no != null ? Number(game.quaffle_lock_step_no) : null;
+  const stepNo = game.step_no != null ? Number(game.step_no) : null;
+  if (ENFORCE_QUAFFLE_STEAL_LOCKS && lockHolderId && lockStepNo != null && stepNo != null) {
+    if (holderId === lockHolderId && stepNo === lockStepNo + 1) return false;
+  }
+
+  const holderRes = await client.query(
+    "SELECT id, team, role, pos, is_observer FROM participants WHERE id = $1 AND game_id = $2",
+    [holderId, game.id]
+  );
+  const holder = holderRes.rows[0];
+  if (!holder || holder.is_observer) return false;
+  if (!isChaserRole(holder.role)) return false;
   if (holder.team === participant.team) return false;
 
   const holderPos =
@@ -2578,7 +2736,10 @@ async function autoEndTurnsInGame(client, gameId) {
         const b1 = normalizeCoord(game.bludger1_pos) || "A7";
         const b2 = normalizeCoord(game.bludger2_pos) || "G7";
         const canHitBludger = chebyshevDistance(from, b1) === 1 || chebyshevDistance(from, b2) === 1;
-        actionRemaining = canKeeperThrow({ from, participant: p, game }) || canHitBludger;
+        actionRemaining =
+          canKeeperThrow({ from, participant: p, game }) ||
+          canHitBludger ||
+          (await canKeeperSteal({ client, from, participant: p, game, tsById }));
       }
     }
 
@@ -2779,13 +2940,47 @@ function botDecisionConfig(difficulty) {
 async function resolveDuelIfReady(client, duelRow) {
   if (!duelRow) return { resolved: false };
   if (duelRow.resolved_at) return { resolved: true, winnerId: duelRow.winner_id || null };
-  if (duelRow.attacker_score == null || duelRow.defender_score == null) return { resolved: false };
-  const a = Number(duelRow.attacker_score);
-  const b = Number(duelRow.defender_score);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return { resolved: false };
-
-  const winnerId = a >= b ? duelRow.attacker_id : duelRow.defender_id;
   const kind = String(duelRow.kind || "steal").toLowerCase();
+  const participantIds = uniqueTextArray(duelRow.participant_ids || [duelRow.attacker_id, duelRow.defender_id]);
+  if (participantIds.length < 2) return { resolved: false };
+
+  await client.query(
+    `
+      INSERT INTO duel_scores (duel_id, participant_id, score)
+      SELECT $1, x, NULL
+      FROM unnest($2::text[]) x
+      ON CONFLICT DO NOTHING
+    `,
+    [duelRow.id, participantIds]
+  );
+
+  const scoresRes = await client.query(
+    "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[]) FOR UPDATE",
+    [duelRow.id, participantIds]
+  );
+  const scoreById = new Map(scoresRes.rows.map((r) => [r.participant_id, r.score]));
+  for (const pid of participantIds) {
+    if (scoreById.get(pid) == null) return { resolved: false };
+  }
+
+  let bestScore = -Infinity;
+  let bestIds = [];
+  for (const pid of participantIds) {
+    const s = Number(scoreById.get(pid));
+    if (!Number.isFinite(s)) continue;
+    if (s > bestScore) {
+      bestScore = s;
+      bestIds = [pid];
+    } else if (s === bestScore) {
+      bestIds.push(pid);
+    }
+  }
+  bestIds.sort();
+  const winnerId = bestIds[0] || duelRow.attacker_id || duelRow.defender_id || null;
+
+  const attackerScore = scoreById.get(duelRow.attacker_id) ?? null;
+  const defenderScore = scoreById.get(duelRow.defender_id) ?? null;
+  await client.query("UPDATE duels SET attacker_score = $2, defender_score = $3 WHERE id = $1", [duelRow.id, attackerScore, defenderScore]);
 
   const gameRes = await client.query(
     "SELECT step_no, team_a, team_b, score_a, score_b, snitch_caught_by_id, quaffle_holder_id, quaffle_pos FROM games WHERE id = $1 FOR UPDATE",
@@ -2849,6 +3044,7 @@ async function resolveDuelIfReady(client, duelRow) {
     }
   } else if (kind === "hit_bludger") {
   } else if (kind === "steal") {
+    const expectedHolderId = duelRow.defender_id || null;
     const upd = await client.query(
       `
         UPDATE games
@@ -2859,13 +3055,15 @@ async function resolveDuelIfReady(client, duelRow) {
             quaffle_steal_cooldown_step_no = $3
         WHERE id = $1 AND ($4::text IS NULL OR quaffle_holder_id = $4)
       `,
-      [duelRow.game_id, winnerId, stepNo, qHolderId]
+      [duelRow.game_id, winnerId, stepNo, expectedHolderId]
     );
     if ((upd.rowCount || 0) > 0) {
-      await client.query("UPDATE participants SET stat_quaffle_steals = COALESCE(stat_quaffle_steals, 0) + 1 WHERE id = $1 AND game_id = $2", [
-        winnerId,
-        duelRow.game_id
-      ]);
+      if (winnerId && expectedHolderId && winnerId !== expectedHolderId) {
+        await client.query("UPDATE participants SET stat_quaffle_steals = COALESCE(stat_quaffle_steals, 0) + 1 WHERE id = $1 AND game_id = $2", [
+          winnerId,
+          duelRow.game_id
+        ]);
+      }
     }
   } else {
   }
@@ -3212,36 +3410,66 @@ async function runBotsInGameClient(client, gameId) {
   if (Boolean(game.finished)) return { changed: false };
 
   const activeDuelRes = await client.query(
-    "SELECT id, game_id, attacker_id, defender_id, kind, target_pos, attacker_score, defender_score, resolved_at, winner_id FROM duels WHERE game_id = $1 AND resolved_at IS NULL ORDER BY started_at DESC LIMIT 1 FOR UPDATE",
+    "SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, attacker_score, defender_score, resolved_at, winner_id FROM duels WHERE game_id = $1 AND resolved_at IS NULL ORDER BY started_at DESC LIMIT 1 FOR UPDATE",
     [gameId]
   );
   const duel = activeDuelRes.rows[0] || null;
   if (duel) {
+    const participantIds = uniqueTextArray(duel.participant_ids || [duel.attacker_id, duel.defender_id]);
+    if (participantIds.length >= 2) {
+      await client.query(
+        `
+          INSERT INTO duel_scores (duel_id, participant_id, score)
+          SELECT $1, x, NULL
+          FROM unnest($2::text[]) x
+          ON CONFLICT DO NOTHING
+        `,
+        [duel.id, participantIds]
+      );
+    }
+
     const pRes = await client.query(
-      "SELECT id, is_bot, bot_difficulty FROM participants WHERE game_id = $1 AND id = ANY($2::text[])",
-      [gameId, [duel.attacker_id, duel.defender_id]]
+      "SELECT id, is_bot, bot_difficulty FROM participants WHERE game_id = $1 AND id = ANY($2::text[]) FOR UPDATE",
+      [gameId, participantIds]
     );
     const byId = new Map(pRes.rows.map((r) => [r.id, r]));
+    const scoresRes = await client.query(
+      "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[]) FOR UPDATE",
+      [duel.id, participantIds]
+    );
+    const scoreById = new Map(scoresRes.rows.map((r) => [r.participant_id, r.score]));
+
     let changed = false;
-    const attacker = byId.get(duel.attacker_id) || null;
-    const defender = byId.get(duel.defender_id) || null;
-    if (attacker?.is_bot && duel.attacker_score == null) {
-      await client.query("UPDATE duels SET attacker_score = $2 WHERE id = $1", [duel.id, botScoreForDuel(attacker.bot_difficulty)]);
+    for (const pid of participantIds) {
+      const p = byId.get(pid) || null;
+      if (!p?.is_bot) continue;
+      if (scoreById.get(pid) != null) continue;
+      await client.query("UPDATE duel_scores SET score = $3 WHERE duel_id = $1 AND participant_id = $2 AND score IS NULL", [
+        duel.id,
+        pid,
+        botScoreForDuel(p.bot_difficulty)
+      ]);
       changed = true;
     }
-    if (defender?.is_bot && duel.defender_score == null) {
-      await client.query("UPDATE duels SET defender_score = $2 WHERE id = $1", [duel.id, botScoreForDuel(defender.bot_difficulty)]);
-      changed = true;
-    }
+
+    const scoresRes2 = await client.query(
+      "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[])",
+      [duel.id, participantIds]
+    );
+    const scoreById2 = new Map(scoresRes2.rows.map((r) => [r.participant_id, r.score]));
+    await client.query("UPDATE duels SET attacker_score = $2, defender_score = $3 WHERE id = $1", [
+      duel.id,
+      scoreById2.get(duel.attacker_id) ?? null,
+      scoreById2.get(duel.defender_id) ?? null
+    ]);
+
     const duelRes2 = await client.query(
-      "SELECT id, game_id, attacker_id, defender_id, kind, target_pos, attacker_score, defender_score, resolved_at, winner_id FROM duels WHERE id = $1 FOR UPDATE",
+      "SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id FROM duels WHERE id = $1 FOR UPDATE",
       [duel.id]
     );
     const duel2 = duelRes2.rows[0] || null;
-    if (duel2 && duel2.attacker_score != null && duel2.defender_score != null) {
-      const resolved = await resolveDuelIfReady(client, duel2);
-      if (resolved.resolved) changed = true;
-    }
+    const resolved = await resolveDuelIfReady(client, duel2);
+    if (resolved.resolved) changed = true;
     return { changed };
   }
 
@@ -3401,7 +3629,7 @@ app.get("/api/games/:code/state", async (req, res) => {
 
   const duelRes = await pool.query(
     `
-      SELECT id, attacker_id, defender_id, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
+      SELECT id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
       FROM duels
       WHERE game_id = $1 AND (resolved_at IS NULL OR resolved_at > NOW() - INTERVAL '10 seconds')
       ORDER BY started_at DESC
@@ -3410,6 +3638,7 @@ app.get("/api/games/:code/state", async (req, res) => {
     [game.id]
   );
   const duel = duelRes.rows[0] || null;
+  let duelScores = null;
 
   const eventsRes = await pool.query(
     "SELECT id, kind, actor_id, step_no, bludger_idx, target_pos, created_at FROM game_events WHERE game_id = $1 ORDER BY created_at DESC LIMIT 20",
@@ -3434,6 +3663,23 @@ app.get("/api/games/:code/state", async (req, res) => {
   }
 
   const byId = new Map(participantsRes.rows.map((p) => [p.id, p]));
+  if (duel) {
+    const participantIds = uniqueTextArray(duel.participant_ids || [duel.attacker_id, duel.defender_id]);
+    try {
+      const scoresRes = await pool.query(
+        "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[])",
+        [duel.id, participantIds]
+      );
+      const scoreById = new Map(scoresRes.rows.map((r) => [r.participant_id, r.score]));
+      duelScores = participantIds.map((pid) => ({
+        participantId: pid,
+        nickname: byId.get(pid)?.nickname || null,
+        score: scoreById.get(pid) ?? null
+      }));
+    } catch {
+      duelScores = participantIds.map((pid) => ({ participantId: pid, nickname: byId.get(pid)?.nickname || null, score: null }));
+    }
+  }
   if (viewerId && !byId.has(viewerId)) return res.status(403).json({ error: "kicked" });
   const viewer = viewerId ? byId.get(viewerId) : null;
   const revealPlansToViewer = Boolean(viewer && !viewer.is_observer);
@@ -3606,6 +3852,7 @@ app.get("/api/games/:code/state", async (req, res) => {
           id: duel.id,
           attackerId: duel.attacker_id,
           defenderId: duel.defender_id,
+          participantIds: uniqueTextArray(duel.participant_ids || [duel.attacker_id, duel.defender_id]),
           kind: duel.kind || "steal",
           targetPos: duel.target_pos || null,
           createdStepNo: duel.created_step_no != null ? Number(duel.created_step_no) : null,
@@ -3614,6 +3861,7 @@ app.get("/api/games/:code/state", async (req, res) => {
           defenderScore: duel.defender_score,
           resolvedAt: duel.resolved_at,
           winnerId: duel.winner_id,
+          scores: duelScores,
           attackerNickname: byId.get(duel.attacker_id)?.nickname || null,
           defenderNickname: byId.get(duel.defender_id)?.nickname || null
         }
@@ -4357,7 +4605,7 @@ app.post("/api/participants/:id/turn/end", async (req, res) => {
     }
 
     if (actionType === "steal") {
-      if (!isChaserRole(p.role)) {
+      if (!isChaserRole(p.role) && !isKeeperRole(p.role)) {
         await client.query("ROLLBACK");
         return res.status(400).json({ error: "role_cannot_steal" });
       }
@@ -4369,10 +4617,10 @@ app.post("/api/participants/:id/turn/end", async (req, res) => {
         await client.query("ROLLBACK");
         return res.status(400).json({ error: "already_holding" });
       }
-      const holderRes = await client.query("SELECT id, role, is_observer FROM participants WHERE id = $1 AND game_id = $2", [
-        p.quaffle_holder_id,
-        p.game_id
-      ]);
+      const holderRes = await client.query(
+        "SELECT id, team, role, pos, is_observer FROM participants WHERE id = $1 AND game_id = $2",
+        [p.quaffle_holder_id, p.game_id]
+      );
       const holder = holderRes.rows[0] || null;
       if (!holder || holder.is_observer) {
         await client.query("ROLLBACK");
@@ -4381,6 +4629,22 @@ app.post("/api/participants/:id/turn/end", async (req, res) => {
       if (isKeeperRole(holder.role)) {
         await client.query("ROLLBACK");
         return res.status(400).json({ error: "cannot_steal_keeper" });
+      }
+      if (!isChaserRole(holder.role)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ error: "quaffle_not_held" });
+      }
+      const holderPos =
+        getPositionForParticipant(holder, gameForSpawn) ||
+        defaultSpawnCoord({ role: holder.role, team: holder.team, teamA: p.team_a, teamB: p.team_b });
+      if (!holderPos) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ error: "invalid_position" });
+      }
+      const d0 = chebyshevDistance(actionFrom, holderPos);
+      if (d0 == null || d0 > 1) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ error: "too_far" });
       }
       const stealCooldownStepNo =
         p.quaffle_steal_cooldown_step_no != null ? Number(p.quaffle_steal_cooldown_step_no) : null;
@@ -4908,7 +5172,7 @@ app.post("/api/participants/:id/quaffle/steal", async (req, res) => {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "observer_cannot_steal" });
     }
-    if (!isChaserRole(p.role)) {
+    if (!isChaserRole(p.role) && !isKeeperRole(p.role)) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "role_cannot_steal" });
     }
@@ -4962,6 +5226,10 @@ app.post("/api/participants/:id/quaffle/steal", async (req, res) => {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "cannot_steal_keeper" });
     }
+    if (!isChaserRole(holder.role)) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "quaffle_not_held" });
+    }
     if (holder.team === p.team) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "not_opponent" });
@@ -5001,15 +5269,17 @@ app.post("/api/participants/:id/quaffle/steal", async (req, res) => {
     }
 
     const duelId = nanoidId();
-    const ins = await client.query(
-      `
-        INSERT INTO duels (id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no)
-        VALUES ($1, $2, $3, $4, 'steal', NULL, $5)
-        ON CONFLICT DO NOTHING
-      `,
-      [duelId, p.game_id, p.id, holderId, stepNo]
-    );
-    if (ins.rowCount === 0) {
+    const insCount = await insertDuelWithParticipants(client, {
+      duelId,
+      gameId: p.game_id,
+      attackerId: p.id,
+      defenderId: holderId,
+      participantIds: [holderId, p.id],
+      kind: "steal",
+      targetPos: null,
+      createdStepNo: stepNo
+    });
+    if (insCount === 0) {
       const active = await client.query("SELECT 1 FROM duels WHERE game_id = $1 AND resolved_at IS NULL LIMIT 1", [p.game_id]);
       if (active.rows[0]) {
         await client.query("ROLLBACK");
@@ -5054,7 +5324,7 @@ app.post("/api/participants/:id/quaffle/steal/submit", async (req, res) => {
 
     const duelRes = await client.query(
       `
-        SELECT id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no, attacker_score, defender_score, resolved_at, winner_id
+        SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, attacker_score, defender_score, resolved_at, winner_id
         FROM duels
         WHERE id = $1
         FOR UPDATE
@@ -5068,18 +5338,27 @@ app.post("/api/participants/:id/quaffle/steal/submit", async (req, res) => {
     }
     if (duel.resolved_at) {
       await client.query("ROLLBACK");
+      const participantIds = uniqueTextArray(duel.participant_ids || [duel.attacker_id, duel.defender_id]);
+      const scoresRes = await pool.query(
+        "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[])",
+        [duelId, participantIds]
+      );
+      const scoreById = new Map(scoresRes.rows.map((r) => [r.participant_id, r.score]));
       return res.json({
         resolved: true,
         winnerId: duel.winner_id,
         attackerId: duel.attacker_id,
         defenderId: duel.defender_id,
         kind: duel.kind || "steal",
-        attackerScore: duel.attacker_score,
-        defenderScore: duel.defender_score
+        participantIds,
+        scores: participantIds.map((pid) => ({ participantId: pid, score: scoreById.get(pid) ?? null })),
+        attackerScore: scoreById.get(duel.attacker_id) ?? duel.attacker_score,
+        defenderScore: scoreById.get(duel.defender_id) ?? duel.defender_score
       });
     }
 
-    if (id !== duel.attacker_id && id !== duel.defender_id) {
+    const participantIds = uniqueTextArray(duel.participant_ids || [duel.attacker_id, duel.defender_id]);
+    if (!participantIds.includes(id)) {
       await client.query("ROLLBACK");
       return res.status(403).json({ error: "not_participant" });
     }
@@ -5096,75 +5375,69 @@ app.post("/api/participants/:id/quaffle/steal/submit", async (req, res) => {
       return res.status(403).json({ error: "game_not_started" });
     }
 
-    if (id === duel.attacker_id && duel.attacker_score != null) {
-      await client.query("COMMIT");
-      return res.json({ resolved: false, alreadySubmitted: true });
-    }
-    if (id === duel.defender_id && duel.defender_score != null) {
+    await client.query(
+      `
+        INSERT INTO duel_scores (duel_id, participant_id, score)
+        VALUES ($1, $2, NULL)
+        ON CONFLICT DO NOTHING
+      `,
+      [duelId, id]
+    );
+
+    const myScoreRes = await client.query(
+      "SELECT score FROM duel_scores WHERE duel_id = $1 AND participant_id = $2 FOR UPDATE",
+      [duelId, id]
+    );
+    if (myScoreRes.rows[0]?.score != null) {
       await client.query("COMMIT");
       return res.json({ resolved: false, alreadySubmitted: true });
     }
 
-    if (id === duel.attacker_id) {
-      await client.query("UPDATE duels SET attacker_score = $2 WHERE id = $1", [duelId, score]);
-    } else {
-      await client.query("UPDATE duels SET defender_score = $2 WHERE id = $1", [duelId, score]);
+    await client.query("UPDATE duel_scores SET score = $3 WHERE duel_id = $1 AND participant_id = $2", [duelId, id, score]);
+
+    const othersRes = await client.query(
+      `
+        SELECT p.id, p.is_bot, p.bot_difficulty, s.score
+        FROM participants p
+        JOIN duel_scores s ON s.participant_id = p.id
+        WHERE p.game_id = $1 AND s.duel_id = $2 AND p.id = ANY($3::text[])
+        FOR UPDATE
+      `,
+      [duel.game_id, duelId, participantIds]
+    );
+    for (const r of othersRes.rows || []) {
+      if (!r || !r.id) continue;
+      if (!Boolean(r.is_bot)) continue;
+      if (r.score != null) continue;
+      await client.query("UPDATE duel_scores SET score = $3 WHERE duel_id = $1 AND participant_id = $2 AND score IS NULL", [
+        duelId,
+        r.id,
+        botScoreForDuel(r.bot_difficulty)
+      ]);
     }
+
+    const scoresRes2 = await client.query(
+      "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[])",
+      [duelId, participantIds]
+    );
+    const scoreById = new Map(scoresRes2.rows.map((r) => [r.participant_id, r.score]));
+    await client.query("UPDATE duels SET attacker_score = $2, defender_score = $3 WHERE id = $1", [
+      duelId,
+      scoreById.get(duel.attacker_id) ?? null,
+      scoreById.get(duel.defender_id) ?? null
+    ]);
 
     const duelRes2 = await client.query(
       `
-        SELECT id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no, attacker_score, defender_score, resolved_at, winner_id
+        SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
         FROM duels
         WHERE id = $1
         FOR UPDATE
       `,
       [duelId]
     );
-    const duel2 = duelRes2.rows[0];
-    if (!duel2) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "not_found" });
-    }
-    if (duel2.resolved_at) {
-      await client.query("COMMIT");
-      return res.json({
-        resolved: true,
-        winnerId: duel2.winner_id,
-        attackerId: duel2.attacker_id,
-        defenderId: duel2.defender_id,
-        kind: duel2.kind || "steal",
-        attackerScore: duel2.attacker_score,
-        defenderScore: duel2.defender_score
-      });
-    }
-
-    if (duel2.attacker_score == null || duel2.defender_score == null) {
-      const otherId = id === duel2.attacker_id ? duel2.defender_id : duel2.attacker_id;
-      const otherRes = await client.query(
-        "SELECT id, is_bot, bot_difficulty FROM participants WHERE game_id = $1 AND id = $2 FOR UPDATE",
-        [duel2.game_id, otherId]
-      );
-      const other = otherRes.rows[0] || null;
-      if (other?.is_bot) {
-        if (otherId === duel2.attacker_id && duel2.attacker_score == null) {
-          await client.query("UPDATE duels SET attacker_score = $2 WHERE id = $1", [duelId, botScoreForDuel(other.bot_difficulty)]);
-        } else if (otherId === duel2.defender_id && duel2.defender_score == null) {
-          await client.query("UPDATE duels SET defender_score = $2 WHERE id = $1", [duelId, botScoreForDuel(other.bot_difficulty)]);
-        }
-      }
-    }
-
-    const duelRes3 = await client.query(
-      `
-        SELECT id, game_id, attacker_id, defender_id, kind, target_pos, created_step_no, attacker_score, defender_score, resolved_at, winner_id
-        FROM duels
-        WHERE id = $1
-        FOR UPDATE
-      `,
-      [duelId]
-    );
-    const duel3 = duelRes3.rows[0] || null;
-    const resolved = await resolveDuelIfReady(client, duel3);
+    const duel2 = duelRes2.rows[0] || null;
+    const resolved = await resolveDuelIfReady(client, duel2);
     if (!resolved.resolved) {
       await client.query("COMMIT");
       return res.json({ resolved: false });
@@ -5174,11 +5447,11 @@ app.post("/api/participants/:id/quaffle/steal/submit", async (req, res) => {
     return res.json({
       resolved: true,
       winnerId: resolved.winnerId,
-      attackerId: duel3.attacker_id,
-      defenderId: duel3.defender_id,
-      kind: duel3.kind || "steal",
-      attackerScore: duel3.attacker_score,
-      defenderScore: duel3.defender_score
+      attackerId: duel2.attacker_id,
+      defenderId: duel2.defender_id,
+      kind: duel2.kind || "steal",
+      participantIds,
+      scores: participantIds.map((pid) => ({ participantId: pid, score: scoreById.get(pid) ?? null }))
     });
   } catch (e) {
     await client.query("ROLLBACK");

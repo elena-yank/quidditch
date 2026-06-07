@@ -74,6 +74,7 @@ async function refreshRoomOnce() {
   captureGameEvents(prev, next);
   state.gameState = next;
   renderRoom(next);
+  autoEndTurnIfNoMoreChoices(next).catch(() => {});
   syncVoiceFromGameState(next).catch(() => {});
 }
 
@@ -962,6 +963,10 @@ async function setupHome() {
 async function autoEndTurnIfNoMoreChoices(gameState) {
   const myId = state.session?.participantId || null;
   if (!myId) return;
+  const started = Boolean(gameState?.game?.started);
+  const finished = Boolean(gameState?.game?.finished);
+  const paused = Boolean(gameState?.game?.paused);
+  if (!started || finished || paused) return;
   const me = gameState.participants.find((p) => p.id === myId) || null;
   if (!me || me.is_observer || !isMovableRole(me.role)) return;
   const stepNo = gameState.game.stepNo ?? null;
@@ -1355,7 +1360,7 @@ async function bootstrap() {
       const gs = state.gameState;
       const myId = state.session?.participantId || null;
       const me = myId && gs ? gs.participants.find((p) => p.id === myId) : null;
-      if (!me || me.is_observer || !isChaserRole(me.role)) return;
+      if (!me || me.is_observer || !(isChaserRole(me.role) || isKeeperRole(me.role))) return;
 
       if (state.draft?.actionType === "steal") {
         state.draft.actionType = null;
@@ -1582,7 +1587,7 @@ async function bootstrap() {
             if (prevHolder && nextHolder && prevHolder !== nextHolder && prevP && nextP) {
               const sameTeam = prevP.team && nextP.team && prevP.team === nextP.team;
               const pass = sameTeam && isChaserRole(prevP.role) && isChaserRole(nextP.role);
-              const steal = !sameTeam && isChaserRole(nextP.role);
+              const steal = !sameTeam && (isChaserRole(nextP.role) || isKeeperRole(nextP.role));
               if (pass) stepMessages.push(quafflePassExportMessage(prevP, nextP));
               else if (steal) stepMessages.push(quaffleStealExportMessage(nextP));
             }
@@ -1702,8 +1707,23 @@ async function bootstrap() {
     els.endTurnBtn.addEventListener("click", async () => {
       const id = state.session?.participantId;
       if (!id) return;
+      const actionType = state.draft?.actionType || null;
+      const actionTo = normalizeCoord(state.draft?.actionTo);
+      const actionBludger = state.draft?.actionBludger ?? null;
+
+      if ((actionType === "pass" || actionType === "throw" || actionType === "hit_bludger") && !actionTo) {
+        if (actionType === "pass") showToast("Выбери охотника для паса");
+        else if (actionType === "throw") showToast("Выбери клетку для броска");
+        else showToast("Выбери клетку для удара по бладжеру");
+        return;
+      }
+      if (actionType === "hit_bludger" && actionBludger == null) {
+        showToast("Выбери бладжер для удара");
+        return;
+      }
+
       let actionFirst = false;
-      if (state.draft?.actionType) {
+      if (actionType) {
         const a = state.draft?.actionPickedAt;
         const m = state.draft?.movePickedAt;
         if (typeof a === "number" && typeof m === "number") actionFirst = a <= m;
@@ -1711,12 +1731,30 @@ async function bootstrap() {
         else if (a == null && typeof m === "number") actionFirst = false;
         else actionFirst = false;
       }
+      if (actionType === "steal") {
+        try {
+          const gs = state.gameState;
+          const myId = state.session?.participantId || null;
+          const me = myId && gs ? gs.participants.find((p) => p.id === myId) : null;
+          const plannedTo = normalizeCoord(state.draft?.to);
+          const basePos =
+            me && gs
+              ? normalizeCoord(me.pos) || defaultSpawnCoord({ role: me.role, team: me.team, teamA: gs.game.teamA, teamB: gs.game.teamB })
+              : null;
+          if (me && gs && plannedTo && basePos) {
+            const canFromNow = canStealQuaffle({ gameState: gs, me, fromCoord: basePos });
+            const canFromPlanned = canStealQuaffle({ gameState: gs, me, fromCoord: plannedTo });
+            if (canFromPlanned && !canFromNow) actionFirst = false;
+            else if (canFromNow && !canFromPlanned) actionFirst = true;
+          }
+        } catch {}
+      }
       const payload = {
         to: normalizeCoord(state.draft?.to),
         actionFirst,
-        actionType: state.draft?.actionType || null,
-        actionTo: normalizeCoord(state.draft?.actionTo),
-        actionBludger: state.draft?.actionBludger ?? null
+        actionType,
+        actionTo,
+        actionBludger
       };
       const res = await api.endTurn(id, payload);
       if (!res.ok) {
@@ -1725,10 +1763,15 @@ async function bootstrap() {
         else if (res.status === 400 && res.body?.error === "role_cannot_end") showToast("Эта роль не ходит");
         else if (res.status === 403 && res.body?.error === "game_not_started") showToast("Ожидается начало игры");
         else if (res.status === 403 && res.body?.error === "game_finished") showToast("Игра уже завершена");
+        else if (res.status === 403 && res.body?.error === "game_paused") showToast("Игра на паузе");
+        else if (res.status === 400 && res.body?.error === "stunned") showToast("Ты оглушён и пропускаешь ход");
         else if (res.status === 400 && res.body?.error === "quaffle_in_goal_zone") showToast("В зоне ворот квоффл может брать только вратарь");
         else if (res.status === 400 && res.body?.error === "cannot_steal_keeper") showToast("Нельзя выхватывать квоффл у вратаря в зоне ворот");
         else if (res.status === 400 && res.body?.error === "use_plans") showToast("Сейчас работает режим заявок");
         else if (res.status === 400 && res.body?.error === "illegal_move") showToast("Нельзя так переместиться");
+        else if (res.status === 400 && res.body?.error === "invalid_action") showToast("Неверное действие");
+        else if (res.status === 400 && res.body?.error === "invalid_target") showToast("Нужно выбрать цель на поле");
+        else if (res.status === 400 && res.body?.error === "invalid_bludger") showToast("Нужно выбрать бладжер");
         else if (res.status === 409 && res.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
         else if (res.status === 409 && res.body?.error === "turn_timed_out") showToast("Время хода вышло");
         else if (res.status === 400 && res.body?.error === "too_far") showToast("Слишком далеко");

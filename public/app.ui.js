@@ -528,8 +528,8 @@ function captureGameEvents(prevState, nextState) {
       duel.attackerId === nextHolder &&
       duel.defenderId === prevHolder &&
       duel.winnerId === nextHolder;
-    const isFallbackSteal = prevP && nextP && prevP.team !== nextP.team && isChaserRole(nextP.role) && !isChaserRole(prevP.role) ? true : false;
-    const isFallbackSteal2 = prevP && nextP && prevP.team !== nextP.team && isChaserRole(nextP.role) && isChaserRole(prevP.role);
+    const isFallbackSteal = prevP && nextP && prevP.team !== nextP.team && (isChaserRole(nextP.role) || isKeeperRole(nextP.role)) && !isChaserRole(prevP.role) ? true : false;
+    const isFallbackSteal2 = prevP && nextP && prevP.team !== nextP.team && (isChaserRole(nextP.role) || isKeeperRole(nextP.role)) && isChaserRole(prevP.role);
     if (nextP && (isDuelSteal || isFallbackSteal || isFallbackSteal2)) {
       pushEventLog(quaffleStealMessage(nextP, counters.quaffle_steal));
     }
@@ -610,10 +610,10 @@ function openDuelOverlay(duel, myId) {
   const startedAtMs = new Date(duel.startedAt).getTime();
   if (!Number.isFinite(startedAtMs)) return;
 
-  const attackerName = duel.attackerNickname || "Атакующий";
-  const defenderName = duel.defenderNickname || "Защитник";
-  const myRole = myId === duel.attackerId ? "attacker" : myId === duel.defenderId ? "defender" : null;
-  if (!myRole) return;
+  const participantIds = Array.isArray(duel.participantIds)
+    ? duel.participantIds.map((x) => String(x || "").trim()).filter(Boolean)
+    : [duel.attackerId, duel.defenderId].map((x) => String(x || "").trim()).filter(Boolean);
+  if (!myId || !participantIds.includes(String(myId))) return;
 
   els.duelOverlay.classList.remove("hidden");
   const kind = String(duel.kind || "steal").toLowerCase();
@@ -624,19 +624,13 @@ function openDuelOverlay(duel, myId) {
     els.duelHint.textContent = "Нажми по прогресс-бару как можно ближе к 100%";
     state.duelUi = {
       duelId: duel.id,
-      role: myRole,
       startedAtMs,
       periodMs: 2200,
       phase: duel.resolvedAt ? "resolved" : "active",
       submitted: false,
       currentPercent: 0,
-      raf: null,
-      attackerName,
-      defenderName
+      raf: null
     };
-  } else {
-    state.duelUi.attackerName = attackerName;
-    state.duelUi.defenderName = defenderName;
   }
 
   const barFill = ensureDuelBarFill();
@@ -644,11 +638,24 @@ function openDuelOverlay(duel, myId) {
 
   if (duel.resolvedAt) {
     stopDuelAnimation();
-    const a = duel.attackerScore ?? 0;
-    const b = duel.defenderScore ?? 0;
+    const scores = Array.isArray(duel.scores) ? duel.scores : null;
+    const parts = [];
+    if (scores && scores.length > 0) {
+      for (const row of scores) {
+        const nick = row?.nickname ? String(row.nickname) : "Игрок";
+        const s = row?.score != null ? Number(row.score) : 0;
+        parts.push(`${nick}: ${Number.isFinite(s) ? s : 0}%`);
+      }
+    } else {
+      const attackerName = duel.attackerNickname || "Атакующий";
+      const defenderName = duel.defenderNickname || "Защитник";
+      const a = duel.attackerScore ?? 0;
+      const b = duel.defenderScore ?? 0;
+      parts.push(`${attackerName}: ${a}%, ${defenderName}: ${b}%`);
+    }
     if (barFill) barFill.style.width = "0%";
     els.duelHint.textContent = "";
-    els.duelResult.textContent = `${attackerName}: ${a}%, ${defenderName}: ${b}%`;
+    els.duelResult.textContent = parts.join(", ");
     state.duelUi.phase = "resolved";
     state.lastResolvedDuelId = duel.id;
     hideDuelOverlaySoon();
@@ -1066,7 +1073,7 @@ function updateQuaffleUi(gameState) {
     return;
   }
 
-  if (isChaserRole(me.role)) {
+  if (isChaserRole(me.role) || isKeeperRole(me.role)) {
     const canSteal = canStealQuaffle({ gameState, me, fromCoord: myPos });
     const isStealLocked = isStealQuaffleLocked({ gameState });
     const wantSteal = chosenType === "steal";
@@ -1079,7 +1086,7 @@ function updateQuaffleUi(gameState) {
       const q = gameState.quaffle || { holderId: null, pos: "D7" };
       if (q.holderId) {
         const holder = (gameState.participants || []).find((p) => p.id === q.holderId) || null;
-        if (holder && !holder.is_observer && !isKeeperRole(holder.role) && holder.team !== me.team) {
+        if (holder && !holder.is_observer && !isKeeperRole(holder.role) && isChaserRole(holder.role) && holder.team !== me.team) {
           const holderPos = normalizeCoord(holder.pos) || defaultSpawnCoord({ role: holder.role, team: holder.team, teamA: gameState.game.teamA, teamB: gameState.game.teamB });
           const d = chebyshevDistance(myPos, holderPos);
           if (d != null && d <= 1) {
@@ -1181,10 +1188,11 @@ function renderPieces(gameState) {
     const turnEnded = !!ts?.ended;
     const movedAlready = !!ts?.moved;
     const actionReserved = !!ts?.actionReserved;
+    const stunned = !!ts?.stunned;
 
-    els.endTurnBtn.disabled = turnEnded || (state.duelUi && state.duelUi.phase === "active");
+    els.endTurnBtn.disabled = turnEnded || stunned || (state.duelUi && state.duelUi.phase === "active");
     els.endTurnBtn.classList.toggle("attention", !els.endTurnBtn.disabled && Boolean(state.draft?.to || state.draft?.actionType));
-    if (turnEnded) {
+    if (turnEnded || stunned) {
       state.selected = null;
       clearBoardSelection();
     } else {
@@ -1197,9 +1205,7 @@ function renderPieces(gameState) {
         const reserved = reservedMovesSet(gameState);
         const myPlanned = normalizeCoord(state.draft?.to) || normalizeCoord(ts?.plannedTo);
         if (myPlanned) reserved.delete(myPlanned);
-        const alreadyMovedInDraft = !!state.draft?.to;
-        const alreadyHasActionInDraft = !!state.draft?.actionType && state.draft.actionType !== "steal";
-        const shouldHighlightMove = !movedAlready && !alreadyMovedInDraft && !alreadyHasActionInDraft;
+        const shouldHighlightMove = !stunned && !movedAlready;
         if (isKeeperRole(me.role)) {
           const ownGoals = me.team === gameState.game.teamA ? GOALS_LEFT_SET : (me.team === gameState.game.teamB ? GOALS_RIGHT_SET : null);
           if (shouldHighlightMove) {
@@ -1445,14 +1451,28 @@ function renderPieces(gameState) {
       if (alreadyHasAction) {
         const finalMoveTo = moveTo;
         const finalActionType = state.draft.actionType;
-        const finalActionTo = state.draft.actionTo;
+        const finalActionTo = normalizeCoord(state.draft.actionTo);
         const finalActionBludger = state.draft.actionBludger;
+        const needsTarget = finalActionType === "pass" || finalActionType === "throw" || finalActionType === "hit_bludger";
+        const needsBludger = finalActionType === "hit_bludger";
+        const ready = (!needsTarget || Boolean(finalActionTo)) && (!needsBludger || finalActionBludger != null);
+        if (!ready) {
+          showToast(`Заявка: перемещение в ${moveTo}`);
+          await refreshRoomOnce();
+          return;
+        }
+
         const endRes = await api.endTurn(pid, { to: finalMoveTo, actionType: finalActionType, actionTo: finalActionTo, actionBludger: finalActionBludger });
         if (!endRes.ok) {
           if (endRes.status === 403 && endRes.body?.error === "game_not_started") showToast("Ожидается начало игры");
+          else if (endRes.status === 403 && endRes.body?.error === "game_paused") showToast("Игра на паузе");
           else if (endRes.status === 400 && endRes.body?.error === "turn_ended") showToast("Ход уже завершен");
+          else if (endRes.status === 400 && endRes.body?.error === "stunned") showToast("Ты оглушён и пропускаешь ход");
           else if (endRes.status === 409 && endRes.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
           else if (endRes.status === 409 && endRes.body?.error === "turn_timed_out") showToast("Время хода вышло");
+          else if (endRes.status === 400 && endRes.body?.error === "invalid_action") showToast("Неверное действие");
+          else if (endRes.status === 400 && endRes.body?.error === "invalid_target") showToast("Нужно выбрать цель на поле");
+          else if (endRes.status === 400 && endRes.body?.error === "invalid_bludger") showToast("Нужно выбрать бладжер");
           else showToast("Не удалось завершить ход");
           await refreshRoomOnce();
           return;
@@ -1501,8 +1521,14 @@ function renderPieces(gameState) {
       const endRes = await api.endTurn(pid, { to: finalMoveTo, actionType: finalActionType, actionTo: finalActionTo, actionBludger: finalActionBludger });
       if (!endRes.ok) {
         if (endRes.status === 403 && endRes.body?.error === "game_not_started") showToast("Ожидается начало игры");
+        else if (endRes.status === 403 && endRes.body?.error === "game_paused") showToast("Игра на паузе");
         else if (endRes.status === 400 && endRes.body?.error === "turn_ended") showToast("Ход уже завершен");
+        else if (endRes.status === 400 && endRes.body?.error === "stunned") showToast("Ты оглушён и пропускаешь ход");
         else if (endRes.status === 409 && endRes.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
+        else if (endRes.status === 409 && endRes.body?.error === "turn_timed_out") showToast("Время хода вышло");
+        else if (endRes.status === 400 && endRes.body?.error === "invalid_action") showToast("Неверное действие");
+        else if (endRes.status === 400 && endRes.body?.error === "invalid_target") showToast("Нужно выбрать цель на поле");
+        else if (endRes.status === 400 && endRes.body?.error === "invalid_bludger") showToast("Нужно выбрать бладжер");
         else showToast("Не удалось завершить ход");
         await refreshRoomOnce();
         return;

@@ -219,11 +219,32 @@ function possibleMovesSeeker(fromCoord) {
 }
 
 function possibleMovesKeeper(fromCoord, ownGoalsSet) {
-  if (!ownGoalsSet || !ownGoalsSet.has(fromCoord)) return [];
+  if (!ownGoalsSet) return [];
+  const zone = new Set();
+  for (const g of ownGoalsSet) {
+    const rc = coordToRC(g);
+    if (!rc) continue;
+    for (let dr = -1; dr <= 1; dr += 1) {
+      for (let dc = -1; dc <= 1; dc += 1) {
+        const c = rcToCoord(rc.r + dr, rc.c + dc);
+        if (c) zone.add(c);
+      }
+    }
+  }
+  if (!zone.has(fromCoord)) return [];
   const from = coordToRC(fromCoord);
   if (!from) return [];
-  const candidates = [rcToCoord(from.r, from.c - 1), rcToCoord(from.r, from.c + 1), rcToCoord(from.r - 1, from.c), rcToCoord(from.r + 1, from.c)].filter(Boolean);
-  return candidates.filter((c) => ownGoalsSet.has(c));
+  const out = [];
+  for (let dr = -1; dr <= 1; dr += 1) {
+    for (let dc = -1; dc <= 1; dc += 1) {
+      if (dr === 0 && dc === 0) continue;
+      const coord = rcToCoord(from.r + dr, from.c + dc);
+      if (!coord) continue;
+      if (!zone.has(coord)) continue;
+      out.push(coord);
+    }
+  }
+  return out;
 }
 
 function canPickupFreeQuaffle({ gameState, meRole, fromCoord }) {
@@ -248,13 +269,14 @@ function isStealQuaffleLocked({ gameState }) {
 
 function canStealQuaffle({ gameState, me, fromCoord }) {
   if (!me || me.is_observer) return false;
-  if (!isChaserRole(me.role)) return false;
+  if (!isChaserRole(me.role) && !isKeeperRole(me.role)) return false;
   const q = gameState?.quaffle || { holderId: null, pos: "D7" };
   if (!q.holderId) return false;
   if (q.holderId === me.id) return false;
   const holder = (gameState.participants || []).find((p) => p.id === q.holderId) || null;
   if (!holder || holder.is_observer) return false;
   if (isKeeperRole(holder.role)) return false;
+  if (!isChaserRole(holder.role)) return false;
   if (holder.team === me.team) return false;
   if (isStealQuaffleLocked({ gameState })) return false;
   const holderPos = normalizeCoord(holder.pos) || defaultSpawnCoord({ role: holder.role, team: holder.team, teamA: gameState.game.teamA, teamB: gameState.game.teamB });
@@ -292,6 +314,7 @@ function hasAnyActionOption({ gameState, me, fromCoord }) {
     if (canHitBludger({ gameState, fromCoord })) return true;
     if (canPickupFreeQuaffle({ gameState, meRole: me.role, fromCoord })) return true;
     if (canThrowQuaffle({ gameState, me, fromCoord })) return true;
+    if (canStealQuaffle({ gameState, me, fromCoord })) return true;
     return false;
   }
   if (isChaserRole(me.role)) {
