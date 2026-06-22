@@ -8,6 +8,7 @@ RUN npm init -y >/dev/null \
 
 COPY server.js ./server.js
 COPY bot.names.js ./bot.names.js
+COPY turnserver.conf ./turnserver.conf
 COPY public ./public
 COPY src ./src
 

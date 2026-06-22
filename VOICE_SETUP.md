@@ -21,6 +21,8 @@ VOICE_TURN_CREDENTIAL=change-me
 
 The backend already exposes these ICE servers through `/api/meta`, and the client uses them for every peer connection.
 
+If you deploy with the repository's `turnserver.conf`, the app can also auto-read that file as a fallback and publish matching `turn:` URLs even when `VOICE_TURN_*` env vars are not set yet. This is useful for the bundled `docker-compose.voice-stack.yml` setup.
+
 ## Coturn Example
 
 The repository contains `docker-compose.turn.yml` with a ready-made `coturn` template.
@@ -54,3 +56,22 @@ Open these ports to the TURN host:
 
 - Several players can talk at the same time: the client uses full-duplex `WebRTC` audio and sends/receives streams in parallel.
 - If voice still fails for some users after `TURN` is configured, first verify the app is opened over `HTTPS` and that the TURN public IP is correct.
+- For the current `turnserver.conf` in this repository, the correct app-side URLs are plain `turn:` URLs on port `3478`, because `no-tls` is enabled there.
+
+## Quick Start For Full Stack
+
+To start the app together with `Postgres`, `Caddy`, and `coturn`, use the default compose file in the repository root:
+
+```bash
+cp .env.voice-stack.example .env.voice-stack
+# edit PUBLIC_HOST and POSTGRES_PASSWORD
+docker compose up -d --build
+```
+
+On Windows PowerShell, you can also run:
+
+```powershell
+.\scripts\start-voice-stack.ps1
+```
+
+This script creates `.env.voice-stack` from the example on first run and then starts the full voice-enabled stack.

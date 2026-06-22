@@ -1,3 +1,5 @@
+const fs = require("fs");
+const path = require("path");
 const {
   BOT_NAMES,
   ENABLED_ROLE_KEYS,
@@ -14,6 +16,73 @@ const {
   isBeaterRole,
   chebyshevDistance
 } = require("../public/shared.rules");
+
+function parseTurnserverConfFallback() {
+  const confPath = path.join(__dirname, "..", "turnserver.conf");
+  let raw = "";
+  try {
+    raw = fs.readFileSync(confPath, "utf8");
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+
+  const config = {
+    host: null,
+    port: "3478",
+    tlsPort: "5349",
+    noTls: false,
+    username: null,
+    credential: null
+  };
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = String(line || "").trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    if (trimmed === "no-tls") {
+      config.noTls = true;
+      continue;
+    }
+
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex < 0) continue;
+
+    const key = trimmed.slice(0, eqIndex).trim();
+    const value = trimmed.slice(eqIndex + 1).trim();
+    if (!value) continue;
+
+    if (key === "external-ip" || key === "realm") {
+      if (!config.host) config.host = value;
+      continue;
+    }
+    if (key === "listening-port") {
+      config.port = value;
+      continue;
+    }
+    if (key === "tls-listening-port") {
+      config.tlsPort = value;
+      continue;
+    }
+    if (key === "user") {
+      const sepIndex = value.indexOf(":");
+      if (sepIndex > 0) {
+        config.username = value.slice(0, sepIndex).trim() || null;
+        config.credential = value.slice(sepIndex + 1).trim() || null;
+      }
+    }
+  }
+
+  if (!config.host || !config.username || !config.credential) return null;
+
+  const urls = [
+    `turn:${config.host}:${config.port}?transport=udp`,
+    `turn:${config.host}:${config.port}?transport=tcp`
+  ];
+  if (!config.noTls && config.tlsPort) urls.push(`turns:${config.host}:${config.tlsPort}?transport=tcp`);
+
+  return [{ urls, username: config.username, credential: config.credential }];
+}
 
 function parseVoiceIceServersEnv() {
   const rawJson = process.env.VOICE_ICE_SERVERS;
@@ -48,7 +117,8 @@ function parseVoiceIceServersEnv() {
     }
   }
 
-  return servers.length > 0 ? servers : null;
+  if (servers.length > 0) return servers;
+  return parseTurnserverConfFallback();
 }
 
 function botNamePoolForRole(roleKey) {
