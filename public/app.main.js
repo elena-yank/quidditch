@@ -2,6 +2,12 @@ async function refreshRoomOnce() {
   if (!state.roomCode) return;
   const res = await api.state(state.roomCode, state.session?.participantId || null);
   if (!res.ok) {
+    if (res.status === 401 && res.body?.error === "invalid_session") {
+      showToast("Сессия устарела — войди заново");
+      clearSession();
+      await goHome();
+      return;
+    }
     if (res.status === 403 && res.body?.error === "kicked") {
       showToast("Тебя заменили в роли");
       clearSession();
@@ -89,7 +95,9 @@ function stopRoomPolling() {
   if (typeof stopTurnTimerUi === "function") stopTurnTimerUi();
 }
 
-let VOICE_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+let VOICE_ICE_SERVERS = [
+  { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"] }
+];
 let voiceControlsHomeParent = null;
 let voiceControlsHomeNextSibling = null;
 let themeToggleHomeParent = null;
@@ -141,7 +149,14 @@ const VOICE_SVG = {
 };
 
 function canUseVoiceInBrowser() {
-  return typeof RTCPeerConnection === "function";
+  return Boolean(window.isSecureContext && typeof RTCPeerConnection === "function" && navigator.mediaDevices?.getUserMedia);
+}
+
+function voiceHasRelayServer() {
+  return VOICE_ICE_SERVERS.some((entry) => {
+    const urls = Array.isArray(entry?.urls) ? entry.urls : [entry?.urls];
+    return urls.some((url) => /^turns?:/i.test(String(url || "").trim()));
+  });
 }
 
 function syncVoiceControlsPlacement() {
@@ -279,7 +294,13 @@ function voiceStopAll() {
 async function voiceEnsureLocalStream() {
   if (state.voice.localStream) return state.voice.localStream;
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("getUserMedia_unavailable");
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    }
+  });
   state.voice.localStream = stream;
   return stream;
 }
@@ -313,7 +334,7 @@ function voiceEnsurePeer(peerId) {
     const fromId = state.session?.participantId || null;
     if (!fromId) return Promise.resolve(null);
     return api.voiceSend(fromId, { toId: peerId, kind, payload: payload ?? {} }).then((r) => {
-      if (r?.status === 404) voiceHandleNotFoundOnce();
+      if (r?.status === 401 || r?.status === 404) voiceHandleNotFoundOnce();
       return r;
     });
   };
@@ -531,7 +552,7 @@ async function voiceHandleSignal(signal) {
       await pc.setLocalDescription(await pc.createAnswer());
       const out = pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription;
       const sendRes = await api.voiceSend(myId, { toId: fromId, kind: "answer", payload: out });
-      if (sendRes?.status === 404) voiceHandleNotFoundOnce();
+      if (sendRes?.status === 401 || sendRes?.status === 404) voiceHandleNotFoundOnce();
     } catch {}
     return;
   }
@@ -572,7 +593,7 @@ async function voicePollOnce() {
     //#region debug-point voice-chat-silent:E:poll-fail
     __traeDebugEvent?.({ kind: "voice_poll_failed", status: res?.status || null, body: res?.body || null });
     //#endregion
-    if (res?.status === 404) voiceHandleNotFoundOnce();
+    if (res?.status === 401 || res?.status === 404) voiceHandleNotFoundOnce();
     return;
   }
   const voiceEnabled = Boolean(res.body?.voiceEnabled);
@@ -606,7 +627,8 @@ async function voicePollOnce() {
 async function voiceSetMicMuted(nextMuted) {
   const next = Boolean(nextMuted);
   state.voice.micMuted = next;
-  if (!next) await voiceEnsureLocalStream();
+  if (next) voiceStopLocalStream();
+  else await voiceEnsureLocalStream();
   for (const peer of state.voice.peers.values()) {
     try {
       await peer._voiceApplyLocal?.();
@@ -883,7 +905,7 @@ async function setupHome() {
       } catch {}
     }
 
-    saveSession({ code, participantId: joinRes.body.participantId });
+    saveSession({ code, participantId: joinRes.body.participantId, sessionToken: joinRes.body.sessionToken || null });
     location.hash = `#room=${code}`;
   });
 
@@ -928,7 +950,7 @@ async function setupHome() {
       else showToast("Не удалось войти");
       return;
     }
-    saveSession({ code, participantId: joinRes.body.participantId });
+    saveSession({ code, participantId: joinRes.body.participantId, sessionToken: joinRes.body.sessionToken || null });
     location.hash = `#room=${code}`;
   });
 
@@ -955,7 +977,7 @@ async function setupHome() {
       return;
     }
 
-    saveSession({ code, participantId: joinRes.body.participantId });
+    saveSession({ code, participantId: joinRes.body.participantId, sessionToken: joinRes.body.sessionToken || null });
     location.hash = `#room=${code}`;
   });
 }
@@ -1035,6 +1057,9 @@ async function bootstrap() {
     for (const d of meta.botDifficulties || []) BOT_DIFFICULTIES.push(d);
     if (Array.isArray(meta.voiceIceServers) && meta.voiceIceServers.length > 0) {
       VOICE_ICE_SERVERS = meta.voiceIceServers;
+    }
+    if (!voiceHasRelayServer()) {
+      console.warn("[voice] TURN relay is not configured. Audio may fail for users behind NAT.");
     }
 
     //#region debug-point voice-chat-silent:A:bootstrap
@@ -1239,7 +1264,7 @@ async function bootstrap() {
         });
         //#endregion
         if (!myId || !gs) return;
-        if (!canUseVoiceInBrowser()) return showToast("Голосовой чат не поддерживается браузером");
+        if (!canUseVoiceInBrowser()) return showToast("Голосовой чат требует HTTPS и доступ к микрофону");
         if (!Boolean(gs?.game?.voiceEnabled)) return showToast("Судья отключил голосовой чат");
         voiceUnlockAudioPlayback();
 
@@ -1268,7 +1293,7 @@ async function bootstrap() {
         const gs = state.gameState;
         const myId = state.session?.participantId || null;
         if (!myId || !gs) return;
-        if (!canUseVoiceInBrowser()) return showToast("Голосовой чат не поддерживается браузером");
+        if (!canUseVoiceInBrowser()) return showToast("Голосовой чат требует HTTPS и доступ к микрофону");
 
         voiceSetSpeakerMuted(!state.voice.speakerMuted);
         voiceUnlockAudioPlayback();
@@ -1386,7 +1411,7 @@ async function bootstrap() {
       state.draft.actionPickedAt = Date.now();
       state.draft.actionTo = null;
       state.draft.actionBludger = null;
-      showToast("Выбрано: выхват квоффла. Нажми «Завершить ход».");
+      showToast(isKeeperRole(me.role) ? "Выбрано: выхват квоффла. При желании выбери клетку для броска." : "Выбрано: выхват квоффла. Нажми «Завершить ход».");
       await refreshRoomOnce();
     });
 
@@ -1537,6 +1562,43 @@ async function bootstrap() {
           return replaceAllPlain(tpl, "[Имя игрока]", nickFor(keeper));
         }
 
+        function escapeHtml(value) {
+          return String(value == null ? "" : value)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        }
+
+        function seekerLogRows(snapshotState) {
+          const seekers = (Array.isArray(snapshotState?.participants) ? snapshotState.participants : [])
+            .filter((p) => p && isSeekerRole(p.role));
+          const snitchPos = snapshotState?.snitchPos || null;
+          const snitchVisible = Boolean(snapshotState?.snitchRevealed);
+          const snitchCaughtById = snapshotState?.snitchCaughtById || null;
+
+          return seekers.map((seeker) => {
+            const participantInfo = participantsById?.[seeker.id] || {};
+            const nickname = participantInfo.nickname || seeker.nickname || "Игрок";
+            const team = participantInfo.team || seeker.team || "—";
+            const pos = seeker.pos || "—";
+            const progressRaw = seeker.snitchProgress != null ? Number(seeker.snitchProgress) : 0;
+            const progress = Number.isFinite(progressRaw) ? Math.max(0, Math.min(100, Math.round(progressRaw))) : 0;
+            const distance = snitchPos && seeker.pos ? chebyshevDistance(seeker.pos, snitchPos) : null;
+            const gain = snitchVisible && distance != null ? (distance <= 1 ? 10 : distance <= 2 ? 5 : 0) : 0;
+            const caughtMark = snitchCaughtById && snitchCaughtById === seeker.id ? "Да" : "Нет";
+            return {
+              nickname,
+              team,
+              pos,
+              distance: distance == null ? "—" : String(distance),
+              progress: `${progress}%`,
+              gain: `+${gain}`,
+              caughtMark
+            };
+          });
+        }
+
         let htmlContent = `
 <!DOCTYPE html>
 <html>
@@ -1566,6 +1628,17 @@ async function bootstrap() {
           const canvas = renderBoardSnapshotToCanvas(snapshot.state);
           const dataUrl = canvas.toDataURL("image/png");
           htmlContent += `<img src="${dataUrl}" class="board-img" alt="Состояние поля на ходу ${stepNo}">`;
+
+          const snitchPos = snapshot.state?.snitchPos || "—";
+          const snitchVisibility = snapshot.state?.snitchRevealed ? "видим" : "скрыт";
+          const snitchCaughtById = snapshot.state?.snitchCaughtById || null;
+          const caughtBy = snitchCaughtById ? (participantsById?.[snitchCaughtById]?.nickname || "Игрок") : "нет";
+          htmlContent += `<div class="messages"><strong>Лог снитча:</strong><ul>`;
+          htmlContent += `<li class="event-item">Снитч: позиция ${escapeHtml(snitchPos)}, статус ${escapeHtml(snitchVisibility)}, пойман: ${escapeHtml(caughtBy)}</li>`;
+          for (const row of seekerLogRows(snapshot.state)) {
+            htmlContent += `<li class="event-item">Ловец ${escapeHtml(row.nickname)} (${escapeHtml(row.team)}): позиция ${escapeHtml(row.pos)}, дистанция ${escapeHtml(row.distance)}, прогресс ${escapeHtml(row.progress)}, прирост за ход ${escapeHtml(row.gain)}, поймал снитч: ${escapeHtml(row.caughtMark)}</li>`;
+          }
+          htmlContent += `</ul></div>`;
 
           const prevState = snapshots[i - 1]?.state || null;
           const nextState = snapshot.state || null;
@@ -1731,7 +1804,7 @@ async function bootstrap() {
         else if (a == null && typeof m === "number") actionFirst = false;
         else actionFirst = false;
       }
-      if (actionType === "steal") {
+      if (actionType === "pickup" || actionType === "keeper_pickup" || actionType === "steal") {
         try {
           const gs = state.gameState;
           const myId = state.session?.participantId || null;
@@ -1742,10 +1815,17 @@ async function bootstrap() {
               ? normalizeCoord(me.pos) || defaultSpawnCoord({ role: me.role, team: me.team, teamA: gs.game.teamA, teamB: gs.game.teamB })
               : null;
           if (me && gs && plannedTo && basePos) {
-            const canFromNow = canStealQuaffle({ gameState: gs, me, fromCoord: basePos });
-            const canFromPlanned = canStealQuaffle({ gameState: gs, me, fromCoord: plannedTo });
-            if (canFromPlanned && !canFromNow) actionFirst = false;
-            else if (canFromNow && !canFromPlanned) actionFirst = true;
+            if (actionType === "steal") {
+              const canFromNow = canStealQuaffle({ gameState: gs, me, fromCoord: basePos });
+              const canFromPlanned = canStealQuaffle({ gameState: gs, me, fromCoord: plannedTo });
+              if (canFromPlanned && !canFromNow) actionFirst = false;
+              else if (canFromNow && !canFromPlanned) actionFirst = true;
+            } else {
+              const canFromNow = canPickupFreeQuaffle({ gameState: gs, role: me.role, fromCoord: basePos });
+              const canFromPlanned = canPickupFreeQuaffle({ gameState: gs, role: me.role, fromCoord: plannedTo });
+              if (canFromPlanned && !canFromNow) actionFirst = false;
+              else if (canFromNow && !canFromPlanned) actionFirst = true;
+            }
           }
         } catch {}
       }
@@ -1766,20 +1846,24 @@ async function bootstrap() {
         else if (res.status === 403 && res.body?.error === "game_paused") showToast("Игра на паузе");
         else if (res.status === 400 && res.body?.error === "stunned") showToast("Ты оглушён и пропускаешь ход");
         else if (res.status === 400 && res.body?.error === "quaffle_in_goal_zone") showToast("В зоне ворот квоффл может брать только вратарь");
-        else if (res.status === 400 && res.body?.error === "cannot_steal_keeper") showToast("Нельзя выхватывать квоффл у вратаря в зоне ворот");
+        else if (res.status === 400 && res.body?.error === "cannot_steal_keeper") showToast("Не удалось выхватить квоффл");
         else if (res.status === 400 && res.body?.error === "use_plans") showToast("Сейчас работает режим заявок");
         else if (res.status === 400 && res.body?.error === "illegal_move") showToast("Нельзя так переместиться");
         else if (res.status === 400 && res.body?.error === "invalid_action") showToast("Неверное действие");
         else if (res.status === 400 && res.body?.error === "invalid_target") showToast("Нужно выбрать цель на поле");
         else if (res.status === 400 && res.body?.error === "invalid_bludger") showToast("Нужно выбрать бладжер");
         else if (res.status === 409 && res.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
+        else if (res.status === 409 && res.body?.error === "request_in_flight") showToast("Заявка уже отправляется");
         else if (res.status === 409 && res.body?.error === "turn_timed_out") showToast("Время хода вышло");
         else if (res.status === 400 && res.body?.error === "too_far") showToast("Слишком далеко");
         else if (res.status === 400 && res.body?.error === "not_opponent_goal") showToast("Это не ворота противника");
         else if (res.status === 400 && res.body?.error === "no_quaffle") showToast("У тебя нет квоффла");
         else if (res.status === 400 && res.body?.error === "steal_locked") showToast("Нельзя выхватить квоффл сразу после смены владельца");
         else if (res.status === 400 && res.body?.error === "steal_cooldown") showToast("Сейчас нельзя выхватить квоффл");
-        else showToast("Не удалось завершить ход");
+        else {
+          const details = String(res.body?.details || res.body?.rawText || "").trim();
+          showToast(details ? `Не удалось завершить ход: ${details}` : "Не удалось завершить ход");
+        }
         await refreshRoomOnce();
         return;
       }
@@ -1791,7 +1875,7 @@ async function bootstrap() {
     const { room } = parseHash();
     if (room) {
       if (!state.session || state.session.code !== room) {
-        state.session = { code: room, participantId: null };
+        state.session = { code: room, participantId: null, sessionToken: null };
       }
       setView("room");
       state.roomCode = room;
@@ -1814,7 +1898,7 @@ async function bootstrap() {
         return;
       }
       const session = loadSession();
-      state.session = session && session.code === nextRoom ? session : { code: nextRoom, participantId: null };
+      state.session = session && session.code === nextRoom ? session : { code: nextRoom, participantId: null, sessionToken: null };
       await goRoom(nextRoom);
     });
 
@@ -1823,7 +1907,7 @@ async function bootstrap() {
       const { room: nextRoom } = parseHash();
       if (!nextRoom) return;
       const session = loadSession();
-      state.session = session && session.code === nextRoom ? session : { code: nextRoom, participantId: null };
+      state.session = session && session.code === nextRoom ? session : { code: nextRoom, participantId: null, sessionToken: null };
       goRoom(nextRoom).catch(() => {});
     });
   } catch {

@@ -9,6 +9,7 @@ RUN npm init -y >/dev/null \
 COPY server.js ./server.js
 COPY bot.names.js ./bot.names.js
 COPY public ./public
+COPY src ./src
 
 ENV NODE_ENV=production
 ENV PORT=3000

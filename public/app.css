@@ -1555,7 +1555,7 @@ body.inRoom .toast {
 
 .resultsTable th,
 .resultsTable td {
-  padding: 8px 10px;
+  padding: 8px 8px;
   border-bottom: 1px solid var(--table-border);
   text-align: left;
   vertical-align: top;
@@ -1568,6 +1568,22 @@ body.inRoom .toast {
   background: rgba(var(--panel-rgb), 0.95);
   z-index: 1;
   font-weight: 700;
+}
+
+.resultsStatHead {
+  width: 78px;
+  min-width: 78px;
+  text-align: center !important;
+  white-space: normal !important;
+  line-height: 1.15;
+  vertical-align: middle !important;
+}
+
+.resultsStatCell {
+  width: 78px;
+  min-width: 78px;
+  text-align: center !important;
+  vertical-align: middle;
 }
 
 .resultsTeamRow td {

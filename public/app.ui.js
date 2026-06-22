@@ -545,6 +545,32 @@ function triangleFill01(tMs, periodMs) {
   return v;
 }
 
+function parseServerTimeMs(value) {
+  if (value == null) return NaN;
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isFinite(t) ? t : NaN;
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
+  const s = String(value || "").trim();
+  if (!s) return NaN;
+
+  const t0 = Date.parse(s);
+  if (Number.isFinite(t0)) return t0;
+
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)(Z|[+-]\d{2}:?\d{2})?$/);
+  if (!m) return NaN;
+
+  const datePart = m[1];
+  let timePart = m[2];
+  timePart = timePart.replace(/\.(\d{3})\d+$/, ".$1");
+  let tz = m[3] || "Z";
+  if (tz !== "Z" && /^[+-]\d{4}$/.test(tz)) tz = `${tz.slice(0, 3)}:${tz.slice(3)}`;
+
+  const t1 = Date.parse(`${datePart}T${timePart}${tz}`);
+  return Number.isFinite(t1) ? t1 : NaN;
+}
+
 function ensureDuelBarFill() {
   const root = els.duelBar || null;
   if (!root) return null;
@@ -607,7 +633,7 @@ function startDuelAnimation() {
 function openDuelOverlay(duel, myId) {
   if (state.lastResolvedDuelId && duel.resolvedAt && duel.id === state.lastResolvedDuelId) return;
   if (state.duelUi && state.duelUi.duelId === duel.id && state.duelUi.phase === "active" && !duel.resolvedAt) return;
-  const startedAtMs = new Date(duel.startedAt).getTime();
+  const startedAtMs = parseServerTimeMs(duel.startedAt);
   if (!Number.isFinite(startedAtMs)) return;
 
   const participantIds = Array.isArray(duel.participantIds)
@@ -1209,7 +1235,34 @@ function renderPieces(gameState) {
         if (isKeeperRole(me.role)) {
           const ownGoals = me.team === gameState.game.teamA ? GOALS_LEFT_SET : (me.team === gameState.game.teamB ? GOALS_RIGHT_SET : null);
           if (shouldHighlightMove) {
-            const moves = possibleMovesKeeper(from, ownGoals);
+            const zone = new Set();
+            if (ownGoals) {
+              for (const g of ownGoals) {
+                const rc = coordToRC(g);
+                if (!rc) continue;
+                for (let dr = -1; dr <= 1; dr += 1) {
+                  for (let dc = -1; dc <= 1; dc += 1) {
+                    const c = rcToCoord(rc.r + dr, rc.c + dc);
+                    if (c) zone.add(c);
+                  }
+                }
+              }
+            }
+            const moves = [];
+            if (zone.has(from)) {
+              const fromRc = coordToRC(from);
+              if (fromRc) {
+                for (let dr = -1; dr <= 1; dr += 1) {
+                  for (let dc = -1; dc <= 1; dc += 1) {
+                    if (dr === 0 && dc === 0) continue;
+                    const c = rcToCoord(fromRc.r + dr, fromRc.c + dc);
+                    if (!c) continue;
+                    if (!zone.has(c)) continue;
+                    moves.push(c);
+                  }
+                }
+              }
+            }
             for (const coord of moves) {
               if (!reserved.has(coord)) continue;
               const cell = els.board.querySelector(`[data-coord='${coord}']`);
@@ -1246,7 +1299,8 @@ function renderPieces(gameState) {
 //#endregion debug-point move-cells-inactive:highlight-keeper
           }
           const hasQuaffle = quaffleHolderId === me.id;
-          if (hasQuaffle && !actionReserved && state.draft?.actionType !== "hit_bludger") {
+          const aimingKeeperStealThrow = state.draft?.actionType === "steal";
+          if (!actionReserved && (aimingKeeperStealThrow || (hasQuaffle && state.draft?.actionType !== "hit_bludger"))) {
             highlightKeeperThrowTargets(actionFrom);
           }
           if (!actionReserved && state.draft?.actionType === "hit_bludger") {
@@ -1350,7 +1404,7 @@ function renderPieces(gameState) {
               highlightThrowTargets({ fromCoord: actionFrom, meTeam: me.team, teamA: gameState.game.teamA, teamB: gameState.game.teamB });
             }
           }
-          if (state.draft?.actionType === "throw" && state.draft?.actionTo) {
+          if ((state.draft?.actionType === "throw" || (isKeeperRole(me.role) && state.draft?.actionType === "steal")) && state.draft?.actionTo) {
             const selectedThrowCell = els.board.querySelector(`[data-coord='${state.draft.actionTo}']`);
             if (selectedThrowCell) selectedThrowCell.classList.add("throwSelected");
           }
@@ -1385,6 +1439,12 @@ function renderPieces(gameState) {
     const isPass = cellEl.classList.contains("passTarget") && quaffleHolderId === state.selected.participantId && state.draft?.actionType === "pass";
     if (isPass) {
       actionType = "pass";
+      actionTo = to;
+    }
+
+    const isKeeperStealThrow = isKeeper && state.draft?.actionType === "steal" && cellEl.classList.contains("throwTarget");
+    if (isKeeperStealThrow) {
+      actionType = "steal";
       actionTo = to;
     }
 
@@ -1462,18 +1522,44 @@ function renderPieces(gameState) {
           return;
         }
 
-        const endRes = await api.endTurn(pid, { to: finalMoveTo, actionType: finalActionType, actionTo: finalActionTo, actionBludger: finalActionBludger });
+        let actionFirst = false;
+        if (finalActionType) {
+          const a = state.draft?.actionPickedAt;
+          const m = state.draft?.movePickedAt;
+          if (typeof a === "number" && typeof m === "number") actionFirst = a <= m;
+          else if (typeof a === "number" && m == null) actionFirst = true;
+          else if (a == null && typeof m === "number") actionFirst = false;
+          else actionFirst = false;
+        }
+        if (finalActionType === "steal") {
+          try {
+            const plannedTo = normalizeCoord(finalMoveTo);
+            const basePos = normalizeCoord(me.pos) || defaultSpawnCoord({ role: me.role, team: me.team, teamA: gameState.game.teamA, teamB: gameState.game.teamB });
+            if (plannedTo && basePos) {
+              const canFromNow = canStealQuaffle({ gameState, me, fromCoord: basePos });
+              const canFromPlanned = canStealQuaffle({ gameState, me, fromCoord: plannedTo });
+              if (canFromPlanned && !canFromNow) actionFirst = false;
+              else if (canFromNow && !canFromPlanned) actionFirst = true;
+            }
+          } catch {}
+        }
+
+        const endRes = await api.endTurn(pid, { to: finalMoveTo, actionFirst, actionType: finalActionType, actionTo: finalActionTo, actionBludger: finalActionBludger });
         if (!endRes.ok) {
           if (endRes.status === 403 && endRes.body?.error === "game_not_started") showToast("Ожидается начало игры");
           else if (endRes.status === 403 && endRes.body?.error === "game_paused") showToast("Игра на паузе");
           else if (endRes.status === 400 && endRes.body?.error === "turn_ended") showToast("Ход уже завершен");
           else if (endRes.status === 400 && endRes.body?.error === "stunned") showToast("Ты оглушён и пропускаешь ход");
           else if (endRes.status === 409 && endRes.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
+          else if (endRes.status === 409 && endRes.body?.error === "request_in_flight") showToast("Заявка уже отправляется");
           else if (endRes.status === 409 && endRes.body?.error === "turn_timed_out") showToast("Время хода вышло");
           else if (endRes.status === 400 && endRes.body?.error === "invalid_action") showToast("Неверное действие");
           else if (endRes.status === 400 && endRes.body?.error === "invalid_target") showToast("Нужно выбрать цель на поле");
           else if (endRes.status === 400 && endRes.body?.error === "invalid_bludger") showToast("Нужно выбрать бладжер");
-          else showToast("Не удалось завершить ход");
+          else {
+            const details = String(endRes.body?.details || endRes.body?.rawText || "").trim();
+            showToast(details ? `Не удалось завершить ход: ${details}` : "Не удалось завершить ход");
+          }
           await refreshRoomOnce();
           return;
         }
@@ -1490,8 +1576,12 @@ function renderPieces(gameState) {
           if (endRes.status === 403 && endRes.body?.error === "game_not_started") showToast("Ожидается начало игры");
           else if (endRes.status === 400 && endRes.body?.error === "turn_ended") showToast("Ход уже завершен");
           else if (endRes.status === 409 && endRes.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
+          else if (endRes.status === 409 && endRes.body?.error === "request_in_flight") showToast("Заявка уже отправляется");
           else if (endRes.status === 409 && endRes.body?.error === "turn_timed_out") showToast("Время хода вышло");
-          else showToast("Не удалось завершить ход");
+          else {
+            const details = String(endRes.body?.details || endRes.body?.rawText || "").trim();
+            showToast(details ? `Не удалось завершить ход: ${details}` : "Не удалось завершить ход");
+          }
           await refreshRoomOnce();
           return;
         }
@@ -1518,18 +1608,44 @@ function renderPieces(gameState) {
         state.draft.actionPickedAt = Date.now();
       }
 
-      const endRes = await api.endTurn(pid, { to: finalMoveTo, actionType: finalActionType, actionTo: finalActionTo, actionBludger: finalActionBludger });
+      let actionFirst = false;
+      if (finalActionType) {
+        const a = state.draft?.actionPickedAt;
+        const m = state.draft?.movePickedAt;
+        if (typeof a === "number" && typeof m === "number") actionFirst = a <= m;
+        else if (typeof a === "number" && m == null) actionFirst = true;
+        else if (a == null && typeof m === "number") actionFirst = false;
+        else actionFirst = false;
+      }
+      if (finalActionType === "steal") {
+        try {
+          const plannedTo = normalizeCoord(finalMoveTo);
+          const basePos = normalizeCoord(me.pos) || defaultSpawnCoord({ role: me.role, team: me.team, teamA: gameState.game.teamA, teamB: gameState.game.teamB });
+          if (plannedTo && basePos) {
+            const canFromNow = canStealQuaffle({ gameState, me, fromCoord: basePos });
+            const canFromPlanned = canStealQuaffle({ gameState, me, fromCoord: plannedTo });
+            if (canFromPlanned && !canFromNow) actionFirst = false;
+            else if (canFromNow && !canFromPlanned) actionFirst = true;
+          }
+        } catch {}
+      }
+
+      const endRes = await api.endTurn(pid, { to: finalMoveTo, actionFirst, actionType: finalActionType, actionTo: finalActionTo, actionBludger: finalActionBludger });
       if (!endRes.ok) {
         if (endRes.status === 403 && endRes.body?.error === "game_not_started") showToast("Ожидается начало игры");
         else if (endRes.status === 403 && endRes.body?.error === "game_paused") showToast("Игра на паузе");
         else if (endRes.status === 400 && endRes.body?.error === "turn_ended") showToast("Ход уже завершен");
         else if (endRes.status === 400 && endRes.body?.error === "stunned") showToast("Ты оглушён и пропускаешь ход");
         else if (endRes.status === 409 && endRes.body?.error === "cell_reserved") showToast("Клетка уже занята другим игроком");
+        else if (endRes.status === 409 && endRes.body?.error === "request_in_flight") showToast("Заявка уже отправляется");
         else if (endRes.status === 409 && endRes.body?.error === "turn_timed_out") showToast("Время хода вышло");
         else if (endRes.status === 400 && endRes.body?.error === "invalid_action") showToast("Неверное действие");
         else if (endRes.status === 400 && endRes.body?.error === "invalid_target") showToast("Нужно выбрать цель на поле");
         else if (endRes.status === 400 && endRes.body?.error === "invalid_bludger") showToast("Нужно выбрать бладжер");
-        else showToast("Не удалось завершить ход");
+        else {
+          const details = String(endRes.body?.details || endRes.body?.rawText || "").trim();
+          showToast(details ? `Не удалось завершить ход: ${details}` : "Не удалось завершить ход");
+        }
         await refreshRoomOnce();
         return;
       }
@@ -1538,6 +1654,7 @@ function renderPieces(gameState) {
       const actionLabel =
         finalActionType === "pass" ? "пас" :
         finalActionType === "throw" ? "бросок" :
+        finalActionType === "steal" ? (finalActionTo ? "выхват и бросок" : "выхват") :
         finalActionType === "hit_bludger" ? "удар по бладжеру" :
         "действие";
       showToast(`Заявка отправлена: ${actionLabel} в ${finalActionTo}`);
@@ -1596,7 +1713,19 @@ function renderResults(gameState) {
     const tr = document.createElement("tr");
     for (const c of cells) {
       const td = document.createElement(isHeader ? "th" : "td");
-      td.textContent = c;
+      if (c && typeof c === "object") {
+        if (Array.isArray(c.lines)) {
+          c.lines.forEach((line, index) => {
+            if (index > 0) td.appendChild(document.createElement("br"));
+            td.appendChild(document.createTextNode(line));
+          });
+        } else {
+          td.textContent = c.text ?? "";
+        }
+        if (c.className) td.className = c.className;
+      } else {
+        td.textContent = c;
+      }
       tr.appendChild(td);
     }
     return tr;
@@ -1610,14 +1739,14 @@ function renderResults(gameState) {
       [
         "Имя",
         "Роль",
-        "Взято квоффлов",
-        "Украдено квоффлов",
-        "Пасы",
-        "Удары по бладжеру",
-        "Попаданий бладжером",
-        "Поймано голов",
-        "Поймано снитчей",
-        "Очки"
+        { lines: ["Взято", "квоффлов"], className: "resultsStatHead" },
+        { lines: ["Украдено", "квоффлов"], className: "resultsStatHead" },
+        { text: "Пасы", className: "resultsStatHead" },
+        { lines: ["Удары по", "бладжеру"], className: "resultsStatHead" },
+        { lines: ["Попаданий", "бладжером"], className: "resultsStatHead" },
+        { lines: ["Поймано", "голов"], className: "resultsStatHead" },
+        { lines: ["Поймано", "снитчей"], className: "resultsStatHead" },
+        { text: "Очки", className: "resultsStatHead" }
       ],
       true
     )
@@ -1639,14 +1768,14 @@ function renderResults(gameState) {
         makeRow([
           p.nickname || "Игрок",
           roleLabel(p.role),
-          String(p?.stats?.pickups ?? 0),
-          String(p?.stats?.steals ?? 0),
-          String(p?.stats?.passes ?? 0),
-          String(p?.stats?.bludgerHits ?? 0),
-          String(p?.stats?.bludgerHitsToPlayers ?? 0),
-          String(p?.stats?.goalsSaved ?? 0),
-          String(p?.stats?.snitches ?? 0),
-          String(p?.stats?.points ?? 0)
+          { text: String(p?.stats?.pickups ?? 0), className: "resultsStatCell" },
+          { text: String(p?.stats?.steals ?? 0), className: "resultsStatCell" },
+          { text: String(p?.stats?.passes ?? 0), className: "resultsStatCell" },
+          { text: String(p?.stats?.bludgerHits ?? 0), className: "resultsStatCell" },
+          { text: String(p?.stats?.bludgerHitsToPlayers ?? 0), className: "resultsStatCell" },
+          { text: String(p?.stats?.goalsSaved ?? 0), className: "resultsStatCell" },
+          { text: String(p?.stats?.snitches ?? 0), className: "resultsStatCell" },
+          { text: String(p?.stats?.points ?? 0), className: "resultsStatCell" }
         ])
       );
     }
@@ -1680,6 +1809,20 @@ async function saveElementAsPng(element, filename = "results.png") {
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&apos;");
+
+  const getCellLines = (cell) => {
+    if (!cell) return [""];
+    const lines = [""];
+    for (const node of Array.from(cell.childNodes || [])) {
+      if (node.nodeName === "BR") {
+        lines.push("");
+        continue;
+      }
+      lines[lines.length - 1] += node.textContent || "";
+    }
+    const normalized = lines.map((line) => String(line || "").trim()).filter(Boolean);
+    return normalized.length ? normalized : [String(cell.textContent || "").trim()];
+  };
 
   const getLogoDataUrl = async () => {
     try {
@@ -1757,7 +1900,9 @@ async function saveElementAsPng(element, filename = "results.png") {
       body{margin:0;}
       .overlayCard{background:${bg};color:#e7f1ea;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
       .resultsTable{width:100%;border-collapse:collapse;font-size:13px;}
-      .resultsTable th,.resultsTable td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,0.12);text-align:left;white-space:nowrap;}
+      .resultsTable th,.resultsTable td{padding:8px 8px;border-bottom:1px solid rgba(255,255,255,0.12);text-align:left;white-space:nowrap;}
+      .resultsStatHead{width:78px;min-width:78px;text-align:center;white-space:normal;line-height:1.15;vertical-align:middle;}
+      .resultsStatCell{width:78px;min-width:78px;text-align:center;vertical-align:middle;}
       .resultsTeamRow td{background:rgba(0,0,0,0.18);font-weight:700;}
       .modalClose,.resultsActions{display:none !important;}
     `;
@@ -1789,7 +1934,9 @@ async function saveElementAsPng(element, filename = "results.png") {
     const table = el.querySelector?.("table.resultsTable");
     if (!table) return null;
 
-    const headCells = Array.from(table.querySelectorAll("thead th")).map((th) => String(th.textContent || "").trim());
+    const headerNodes = Array.from(table.querySelectorAll("thead th"));
+    const headCells = headerNodes.map((th) => getCellLines(th));
+    const statCols = headerNodes.map((th) => th.classList.contains("resultsStatHead"));
     const colCount = headCells.length || 8;
 
     const bodyRows = Array.from(table.querySelectorAll("tbody tr")).map((tr) => {
@@ -1804,7 +1951,7 @@ async function saveElementAsPng(element, filename = "results.png") {
     });
 
     const colWidths = new Array(colCount).fill(60);
-    const padX = 10;
+    const padX = 8;
     const left = 16;
     const right = 16;
     const top = 16;
@@ -1812,7 +1959,7 @@ async function saveElementAsPng(element, filename = "results.png") {
     const titleH = 24;
     const metaH = metaText ? 18 : 0;
     const gap = 10;
-    const headerH = 30;
+    const headerH = 42;
     const rowH = 28;
     const teamH = 26;
 
@@ -1822,14 +1969,16 @@ async function saveElementAsPng(element, filename = "results.png") {
     };
 
     for (let i = 0; i < colCount; i += 1) {
-      const w = measure(headCells[i] || "", true) + padX * 2;
-      colWidths[i] = Math.max(colWidths[i], w);
+      const headerLines = headCells[i] || [""];
+      const maxHeaderWidth = headerLines.reduce((max, line) => Math.max(max, measure(line || "", true)), 0);
+      const w = maxHeaderWidth + padX * 2;
+      colWidths[i] = Math.max(colWidths[i], statCols[i] ? 78 : w);
     }
     for (const r of bodyRows) {
       if (r.kind !== "row") continue;
       for (let i = 0; i < colCount; i += 1) {
         const w = measure(r.cells[i] || "", false) + padX * 2;
-        colWidths[i] = Math.max(colWidths[i], w);
+        colWidths[i] = Math.max(colWidths[i], statCols[i] ? 78 : w);
       }
     }
 
@@ -1873,7 +2022,19 @@ async function saveElementAsPng(element, filename = "results.png") {
 
     out += `<rect x="${left}" y="${y}" width="${tableW}" height="${headerH}" fill="rgba(255,255,255,0.10)"/>`;
     for (let i = 0; i < colCount; i += 1) {
-      out += `<text x="${xs[i] + padX}" y="${textY(y, headerH)}" fill="#e7f1ea" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-size="13" font-weight="700">${escapeXml(headCells[i] || "")}</text>`;
+      const lines = headCells[i] || [""];
+      const centerX = xs[i] + Math.floor(colWidths[i] / 2);
+      if (lines.length > 1) {
+        const lineGap = 14;
+        const startY = y + Math.floor((headerH - lineGap * (lines.length - 1)) / 2) + 5;
+        for (let j = 0; j < lines.length; j += 1) {
+          out += `<text x="${centerX}" y="${startY + j * lineGap}" fill="#e7f1ea" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle">${escapeXml(lines[j] || "")}</text>`;
+        }
+      } else {
+        const anchor = statCols[i] ? "middle" : "start";
+        const textX = statCols[i] ? centerX : xs[i] + padX;
+        out += `<text x="${textX}" y="${textY(y, headerH)}" fill="#e7f1ea" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="${anchor}">${escapeXml(lines[0] || "")}</text>`;
+      }
     }
     y += headerH;
 
@@ -1890,7 +2051,9 @@ async function saveElementAsPng(element, filename = "results.png") {
         continue;
       }
       for (let i = 0; i < colCount; i += 1) {
-        out += `<text x="${xs[i] + padX}" y="${textY(y, rowH)}" fill="#e7f1ea" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-size="13">${escapeXml(r.cells[i] || "")}</text>`;
+        const anchor = statCols[i] ? "middle" : "start";
+        const textX = statCols[i] ? xs[i] + Math.floor(colWidths[i] / 2) : xs[i] + padX;
+        out += `<text x="${textX}" y="${textY(y, rowH)}" fill="#e7f1ea" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-size="13" text-anchor="${anchor}">${escapeXml(r.cells[i] || "")}</text>`;
       }
       y += rowH;
       out += line(left, y, left + tableW, y);
