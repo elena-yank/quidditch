@@ -22,6 +22,7 @@ VOICE_TURN_CREDENTIAL=change-me
 The backend already exposes these ICE servers through `/api/meta`, and the client uses them for every peer connection.
 
 If you deploy with the repository's `turnserver.conf`, the app can also auto-read that file as a fallback and publish matching `turn:` URLs even when `VOICE_TURN_*` env vars are not set yet. This is useful for the bundled `docker-compose.voice-stack.yml` setup.
+For stricter networks, the recommended production setup is to enable `turns:` as well, so the client can fall back to TURN over TLS.
 
 ## Coturn Example
 
@@ -57,6 +58,33 @@ Open these ports to the TURN host:
 - Several players can talk at the same time: the client uses full-duplex `WebRTC` audio and sends/receives streams in parallel.
 - If voice still fails for some users after `TURN` is configured, first verify the app is opened over `HTTPS` and that the TURN public IP is correct.
 - For the current `turnserver.conf` in this repository, the correct app-side URLs are plain `turn:` URLs on port `3478`, because `no-tls` is enabled there.
+
+## Recommended Hardening
+
+To avoid future failures for users behind strict NAT, office Wi-Fi, campus networks, or mobile operators, enable `TURN TLS`:
+
+1. Start from `turnserver.tls.conf.example`.
+2. Set real values for `realm`, `user`, `external-ip`, `cert`, and `pkey`.
+3. Open `5349/tcp` in addition to `3478` and the relay range.
+4. Publish explicit app-side URLs through `VOICE_TURN_URLS`, for example:
+
+```env
+VOICE_TURN_URLS=turn:quidditch.aurorhq.ru:3478?transport=udp,turn:quidditch.aurorhq.ru:3478?transport=tcp,turns:quidditch.aurorhq.ru:5349?transport=tcp
+VOICE_TURN_USERNAME=kwidditch
+VOICE_TURN_CREDENTIAL=change-me-now
+```
+
+This keeps the app config and the host-mounted `coturn` config in sync even if they are deployed separately.
+
+## Host-Network Deploy
+
+If you deploy with `docker build` and `docker run --network host`, use:
+
+1. `.env.voice-host.example` as the base env file for the app and container names.
+2. `turnserver.tls.conf.example` as the base TURN config.
+3. `scripts/restart-host-voice.sh` to rebuild and restart both the app and `coturn`.
+
+The script expects TLS files in `/opt/quidditch/certs/fullchain.pem` and `/opt/quidditch/certs/privkey.pem`.
 
 ## Quick Start For Full Stack
 

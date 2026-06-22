@@ -31,6 +31,7 @@ services:
     ports:
       - "3478:3478/tcp"
       - "3478:3478/udp"
+      - "5349:5349/tcp"
       - "49160-49200:49160-49200/tcp"
       - "49160-49200:49160-49200/udp"
     command: ["-c", "/etc/coturn/turnserver.conf"]

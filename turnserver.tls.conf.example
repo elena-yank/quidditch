@@ -1,0 +1,15 @@
+fingerprint
+lt-cred-mech
+realm=quidditch.aurorhq.ru
+user=kwidditch:86e1388d5b7d4c0593db6460eeae23e6
+external-ip=45.85.105.212
+listening-ip=0.0.0.0
+listening-port=3478
+tls-listening-port=5349
+min-port=49160
+max-port=49200
+cert=/etc/coturn/certs/fullchain.pem
+pkey=/etc/coturn/certs/privkey.pem
+no-cli
+no-dtls
+simple-log
