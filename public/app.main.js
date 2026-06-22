@@ -312,7 +312,8 @@ function voiceEnsurePeer(peerId) {
   if (!canUseVoiceInBrowser()) return null;
 
   const pc = new RTCPeerConnection({ iceServers: VOICE_ICE_SERVERS });
-  const audioTransceiver = pc.addTransceiver("audio", { direction: "recvonly" });
+  const audioTransceiver = pc.addTransceiver("audio", { direction: "sendrecv" });
+  const initiator = String(myId) < String(peerId);
   const polite = String(myId) > String(peerId);
 
   const audioEl = document.createElement("audio");
@@ -327,7 +328,19 @@ function voiceEnsurePeer(peerId) {
   audioEl.style.pointerEvents = "none";
   document.body.appendChild(audioEl);
 
-  const peer = { peerId, pc, audioEl, audioTransceiver, polite, makingOffer: false, needsNegotiation: false, ignoreOffer: false, pendingIce: [], disconnectTimer: null };
+  const peer = {
+    peerId,
+    pc,
+    audioEl,
+    audioTransceiver,
+    initiator,
+    polite,
+    makingOffer: false,
+    needsNegotiation: false,
+    ignoreOffer: false,
+    pendingIce: [],
+    disconnectTimer: null
+  };
   state.voice.peers.set(peerId, peer);
 
   const sendSignal = (kind, payload) => {
@@ -369,9 +382,6 @@ function voiceEnsurePeer(peerId) {
     if (pc.connectionState === "closed") return;
     try {
       if (state.voice.micMuted) {
-        try {
-          peer.audioTransceiver.direction = "recvonly";
-        } catch {}
         await peer.audioTransceiver.sender.replaceTrack(null);
         return;
       }
@@ -381,15 +391,13 @@ function voiceEnsurePeer(peerId) {
       try {
         track.enabled = true;
       } catch {}
-      try {
-        peer.audioTransceiver.direction = "sendrecv";
-      } catch {}
       await peer.audioTransceiver.sender.replaceTrack(track);
     } catch {}
   };
 
   const negotiate = async () => {
     if (pc.connectionState === "closed") return;
+    if (!peer.initiator) return;
     if (peer.makingOffer) return;
     if (pc.signalingState !== "stable") {
       peer.needsNegotiation = true;
@@ -531,9 +539,6 @@ async function voiceHandleSignal(signal) {
       }
       try {
         if (state.voice.micMuted) {
-          try {
-            peer.audioTransceiver.direction = "recvonly";
-          } catch {}
           await peer.audioTransceiver.sender.replaceTrack(null);
         } else {
           const stream = await voiceEnsureLocalStream();
@@ -541,9 +546,6 @@ async function voiceHandleSignal(signal) {
           if (track) {
             try {
               track.enabled = true;
-            } catch {}
-            try {
-              peer.audioTransceiver.direction = "sendrecv";
             } catch {}
             await peer.audioTransceiver.sender.replaceTrack(track);
           }
@@ -633,9 +635,6 @@ async function voiceSetMicMuted(nextMuted) {
     try {
       await peer._voiceApplyLocal?.();
     } catch {}
-    try {
-      await peer._voiceNegotiate?.();
-    } catch {}
   }
 }
 
@@ -698,7 +697,7 @@ async function syncVoiceFromGameState(gameState) {
     if (!p || p.id === myId) continue;
     if (Boolean(p.is_bot)) continue;
     canPeer.add(p.id);
-    voiceEnsurePeer(p.id);
+    if (String(myId) < String(p.id)) voiceEnsurePeer(p.id);
   }
   for (const peerId of Array.from(state.voice.peers.keys())) {
     if (!canPeer.has(peerId)) voiceClosePeer(peerId);
