@@ -95,6 +95,93 @@ async function ensureGameStartedEffective(client, gameId, startedRaw) {
   return Boolean(startedRaw);
 }
 
+function findPickupDefender({
+  participants,
+  moveToByIdBeforeActions,
+  pickerId,
+  pickerTeam,
+  qCoord,
+  positionsById,
+  includePostMovePickup
+}) {
+  let defenderId = null;
+  let bestD = Infinity;
+  if (!pickerTeam) return null;
+  for (const pp of participants || []) {
+    if (pp.id === pickerId) continue;
+    if (Boolean(pp.stunned)) continue;
+    if (pp.team === pickerTeam) continue;
+    if (!(pp.role === "keeper" || pp.role === "chaser1" || pp.role === "chaser2")) continue;
+
+    let from2 = positionsById.get(pp.id) || null;
+    if (includePostMovePickup) {
+      const ppType = normalizePlannedActionType(pp.planned_action_type);
+      const isPickup = (ppType === "pickup" && isChaserRole(pp.role)) || (ppType === "keeper_pickup" && isKeeperRole(pp.role));
+      if (isPickup && !Boolean(pp.planned_action_first)) {
+        from2 = moveToByIdBeforeActions.get(pp.id) || from2;
+      }
+    }
+    if (!from2) continue;
+    const d2 = chebyshevDistance(from2, qCoord);
+    if (d2 == null || d2 > 1) continue;
+    if (d2 < bestD) {
+      bestD = d2;
+      defenderId = pp.id;
+    }
+  }
+  return defenderId;
+}
+
+function collectStealCandidatesAgainstHolder({
+  participants,
+  holder,
+  holderId,
+  holderPos,
+  positionsById,
+  actionFirst,
+  stepNo,
+  stealCooldownStepNo,
+  lockHolderId,
+  lockStepNo
+}) {
+  if (!holder || !holderId || !holderPos) return [];
+  const stealCandidates = [];
+  for (const p of participants || []) {
+    if (Boolean(p.stunned)) continue;
+    const actionType = normalizePlannedActionType(p.planned_action_type);
+    if (actionType !== "steal") continue;
+    if (!isChaserRole(p.role) && !isKeeperRole(p.role)) continue;
+    if (Boolean(p.planned_action_first) !== Boolean(actionFirst)) continue;
+    if (holderId === p.id) continue;
+    if (ENFORCE_QUAFFLE_STEAL_LOCKS && stealCooldownStepNo != null && stepNo === stealCooldownStepNo + 1) continue;
+    if (ENFORCE_QUAFFLE_STEAL_LOCKS && lockHolderId && lockStepNo != null && stepNo === lockStepNo + 1 && holderId === lockHolderId) continue;
+    if (holder.team === p.team) continue;
+    const attackerPos = positionsById.get(p.id) || null;
+    if (!attackerPos) continue;
+    const d = chebyshevDistance(attackerPos, holderPos);
+    if (d == null || d > 1) continue;
+    stealCandidates.push(p.id);
+  }
+  return stealCandidates;
+}
+
+function collectPickupCandidatesAtCoord({ participants, qCoord, positionsById, actionFirst }) {
+  const pickupCandidates = [];
+  for (const p of participants || []) {
+    if (Boolean(p.stunned)) continue;
+    if (Boolean(p.planned_action_first) !== Boolean(actionFirst)) continue;
+    const actionType = normalizePlannedActionType(p.planned_action_type);
+    const isChaserPickup = actionType === "pickup" && isChaserRole(p.role);
+    const isKeeperPickup = actionType === "keeper_pickup" && isKeeperRole(p.role);
+    if (!isChaserPickup && !isKeeperPickup) continue;
+    const from = positionsById.get(p.id);
+    if (!from) continue;
+    const d = chebyshevDistance(from, qCoord);
+    if (d != null && d <= 1) pickupCandidates.push(p.id);
+  }
+  return pickupCandidates;
+}
+
 async function expireOldTurns(gameId) {
   const client = await pool.connect();
   try {
@@ -337,59 +424,27 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     }
   }
 
-  function findPickupDefender({ pickerId, pickerTeam, qCoord, positionsById, includePostMovePickup }) {
-    let defenderId = null;
-    let bestD = Infinity;
-    if (!pickerTeam) return null;
-    for (const pp of participants) {
-      if (pp.id === pickerId) continue;
-      if (Boolean(pp.stunned)) continue;
-      if (pp.team === pickerTeam) continue;
-      if (!(pp.role === "keeper" || pp.role === "chaser1" || pp.role === "chaser2")) continue;
-
-      let from2 = positionsById.get(pp.id) || null;
-      if (includePostMovePickup) {
-        const ppType = normalizePlannedActionType(pp.planned_action_type);
-        const isPickup = (ppType === "pickup" && isChaserRole(pp.role)) || (ppType === "keeper_pickup" && isKeeperRole(pp.role));
-        if (isPickup && !Boolean(pp.planned_action_first)) {
-          from2 = moveToByIdBeforeActions.get(pp.id) || from2;
-        }
-      }
-      if (!from2) continue;
-      const d2 = chebyshevDistance(from2, qCoord);
-      if (d2 == null || d2 > 1) continue;
-      if (d2 < bestD) {
-        bestD = d2;
-        defenderId = pp.id;
-      }
-    }
-    return defenderId;
-  }
-
-  function collectStealCandidatesAgainstHolder({ holder, holderId, holderPos, positionsById, actionFirst }) {
-    if (!holder || !holderId || !holderPos) return [];
-    const stealCandidates = [];
-    for (const p of participants) {
-      if (Boolean(p.stunned)) continue;
-      const actionType = normalizePlannedActionType(p.planned_action_type);
-      if (actionType !== "steal") continue;
-      if (!isChaserRole(p.role) && !isKeeperRole(p.role)) continue;
-      if (Boolean(p.planned_action_first) !== Boolean(actionFirst)) continue;
-      if (holderId === p.id) continue;
-      if (ENFORCE_QUAFFLE_STEAL_LOCKS && stealCooldownStepNo != null && stepNo === stealCooldownStepNo + 1) continue;
-      if (ENFORCE_QUAFFLE_STEAL_LOCKS && lockHolderId && lockStepNo != null && stepNo === lockStepNo + 1 && holderId === lockHolderId) continue;
-      if (holder.team === p.team) continue;
-      const attackerPos = positionsById.get(p.id) || null;
-      if (!attackerPos) continue;
-      const d = chebyshevDistance(attackerPos, holderPos);
-      if (d == null || d > 1) continue;
-      stealCandidates.push(p.id);
-    }
-    return stealCandidates;
+  const postMoveActionPosById = new Map();
+  for (const p of participants) {
+    const from = fromById.get(p.id) || null;
+    const to = moveToByIdBeforeActions.get(p.id) || null;
+    const pos = to || from;
+    if (pos) postMoveActionPosById.set(p.id, pos);
   }
 
   async function maybeStartStealConflictDuel({ kind, holder, holderId, holderPos, positionsById, actionFirst, targetPos }) {
-    const stealCandidates = collectStealCandidatesAgainstHolder({ holder, holderId, holderPos, positionsById, actionFirst });
+    const stealCandidates = collectStealCandidatesAgainstHolder({
+      participants,
+      holder,
+      holderId,
+      holderPos,
+      positionsById,
+      actionFirst,
+      stepNo,
+      stealCooldownStepNo,
+      lockHolderId,
+      lockStepNo
+    });
     if (stealCandidates.length === 0) return false;
     const duelId = nanoidId();
     const insCount = await insertDuelWithParticipants(client, {
@@ -436,22 +491,11 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
   const bludgersHitThisStep = new Set();
   let scoreA = gameRow?.score_a != null ? Number(gameRow.score_a) : 0;
   let scoreB = gameRow?.score_b != null ? Number(gameRow.score_b) : 0;
+  let pendingGoalResolution = null;
 
   if (!qHolderId) {
     const qCoord = normalizeCoord(qPos) || "D7";
-    const pickupCandidates = [];
-    for (const p of participants) {
-      if (Boolean(p.stunned)) continue;
-      if (!Boolean(p.planned_action_first)) continue;
-      const actionType = normalizePlannedActionType(p.planned_action_type);
-      const isChaserPickup = actionType === "pickup" && isChaserRole(p.role);
-      const isKeeperPickup = actionType === "keeper_pickup" && isKeeperRole(p.role);
-      if (!isChaserPickup && !isKeeperPickup) continue;
-      const from = actionPosById.get(p.id);
-      if (!from) continue;
-      const d = chebyshevDistance(from, qCoord);
-      if (d != null && d <= 1) pickupCandidates.push(p.id);
-    }
+    const pickupCandidates = collectPickupCandidatesAtCoord({ participants, qCoord, positionsById: actionPosById, actionFirst: true });
 
     if (pickupCandidates.length >= 2) {
       const duelId = nanoidId();
@@ -475,6 +519,8 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const picker = participants.find((pp) => pp.id === pickerId) || null;
       const pickerTeam = picker?.team || null;
       const defenderId = findPickupDefender({
+        participants,
+        moveToByIdBeforeActions,
         pickerId,
         pickerTeam,
         qCoord,
@@ -725,19 +771,31 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         targetPos: `throw:pre:${p.id}`
       });
       if (throwStealStarted) return;
+      const throwStealPostStarted = await maybeStartStealConflictDuel({
+        kind: "throw_steal",
+        holder: p,
+        holderId: p.id,
+        holderPos: from,
+        positionsById: postMoveActionPosById,
+        actionFirst: false,
+        targetPos: `throw:pre:${p.id}`
+      });
+      if (throwStealPostStarted) return;
 
       if (isKeeperRole(p.role)) {
         if (d === 0 || d > 6) continue;
         const chaserId = occupantChaserByCoord.get(to) || null;
         if (chaserId) {
           const receiver = participants.find((pp) => pp.id === chaserId) || null;
-          if (receiver && receiver.team === p.team) {
+          if (receiver) {
             nextHolderId = chaserId;
             nextPos = null;
-            await client.query("UPDATE participants SET stat_quaffle_passes = COALESCE(stat_quaffle_passes, 0) + 1 WHERE id = $1 AND game_id = $2", [
-              p.id,
-              gameId
-            ]);
+            if (receiver.team === p.team) {
+              await client.query("UPDATE participants SET stat_quaffle_passes = COALESCE(stat_quaffle_passes, 0) + 1 WHERE id = $1 AND game_id = $2", [
+                p.id,
+                gameId
+              ]);
+            }
           }
         }
       } else if (isChaserRole(p.role)) {
@@ -756,19 +814,14 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         } else {
           nextHolderId = null;
           nextPos = to;
-          if (isTeamA) scoreA += 10;
-          else if (isTeamB) scoreB += 10;
           const keeper = defenderTeam ? participants.find((pp) => pp.team === defenderTeam && isKeeperRole(pp.role)) : null;
-          if (keeper?.id) {
-            await client.query(
-              "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-              [nanoidId(), gameId, stepNo, "goal", keeper.id, null, to]
-            );
-          }
-          await client.query("UPDATE participants SET stat_goals_scored = COALESCE(stat_goals_scored, 0) + 1 WHERE id = $1 AND game_id = $2", [
-            p.id,
-            gameId
-          ]);
+          pendingGoalResolution = {
+            actorId: p.id,
+            defenderTeam,
+            keeperId: keeper?.id || null,
+            targetPos: to,
+            scoringTeam: p.team
+          };
         }
       } else {
         continue;
@@ -787,7 +840,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     }
   }
 
-  if (qHolderId && moveToByIdBeforeActions.has(qHolderId)) {
+  if (qHolderId) {
     const holder = participants.find((pp) => pp.id === qHolderId) || null;
     const holderPosPre = actionPosById.get(qHolderId) || null;
     if (holder && holderPosPre && (isChaserRole(holder.role) || isKeeperRole(holder.role))) {
@@ -885,19 +938,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 
   if (!qHolderId) {
     const qCoord = normalizeCoord(qPos) || "D7";
-    const pickupCandidates = [];
-    for (const p of participants) {
-      if (Boolean(p.stunned)) continue;
-      if (Boolean(p.planned_action_first)) continue;
-      const actionType = normalizePlannedActionType(p.planned_action_type);
-      const isChaserPickup = actionType === "pickup" && isChaserRole(p.role);
-      const isKeeperPickup = actionType === "keeper_pickup" && isKeeperRole(p.role);
-      if (!isChaserPickup && !isKeeperPickup) continue;
-      const from = posById.get(p.id);
-      if (!from) continue;
-      const d = chebyshevDistance(from, qCoord);
-      if (d != null && d <= 1) pickupCandidates.push(p.id);
-    }
+    const pickupCandidates = collectPickupCandidatesAtCoord({ participants, qCoord, positionsById: posById, actionFirst: false });
 
     if (pickupCandidates.length >= 2) {
       const duelId = nanoidId();
@@ -921,6 +962,8 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const picker = participants.find((pp) => pp.id === pickerId) || null;
       const pickerTeam = picker?.team || null;
       const defenderId = findPickupDefender({
+        participants,
+        moveToByIdBeforeActions,
         pickerId,
         pickerTeam,
         qCoord,
@@ -985,6 +1028,58 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     occupantAnyByCoordAfter.set(pos, p.id);
     if (p.role === "chaser1" || p.role === "chaser2") occupantChaserByCoordAfter.set(pos, p.id);
     if (p.role === "keeper") occupantKeeperByCoordAfter.set(pos, p.id);
+  }
+
+  if (pendingGoalResolution && !qHolderId) {
+    const targetPos = normalizeCoord(qPos) || pendingGoalResolution.targetPos;
+    if (targetPos === pendingGoalResolution.targetPos) {
+      const keeperIdAtTarget = occupantKeeperByCoordAfter.get(targetPos) || null;
+      if (keeperIdAtTarget) {
+        const prevHolderId = qHolderId;
+        qHolderId = keeperIdAtTarget;
+        qPos = null;
+        if (qHolderId && qHolderId !== prevHolderId) {
+          lockHolderId = qHolderId;
+          lockStepNo = stepNo;
+        }
+        await client.query("UPDATE participants SET stat_goals_saved = COALESCE(stat_goals_saved, 0) + 1 WHERE id = $1 AND game_id = $2", [
+          keeperIdAtTarget,
+          gameId
+        ]);
+      } else {
+        if (pendingGoalResolution.scoringTeam === gameForSpawn.team_a) scoreA += 10;
+        else if (pendingGoalResolution.scoringTeam === gameForSpawn.team_b) scoreB += 10;
+        if (pendingGoalResolution.keeperId) {
+          await client.query(
+            "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            [nanoidId(), gameId, stepNo, "goal", pendingGoalResolution.keeperId, null, targetPos]
+          );
+        }
+        await client.query("UPDATE participants SET stat_goals_scored = COALESCE(stat_goals_scored, 0) + 1 WHERE id = $1 AND game_id = $2", [
+          pendingGoalResolution.actorId,
+          gameId
+        ]);
+      }
+      pendingGoalResolution = null;
+    }
+  }
+
+  if (!pendingGoalResolution && !qHolderId) {
+    const qCoord = normalizeCoord(qPos) || "D7";
+    const keeperIdAtQuaffle = occupantKeeperByCoordAfter.get(qCoord) || null;
+    if (keeperIdAtQuaffle) {
+      const prevHolderId = qHolderId;
+      qHolderId = keeperIdAtQuaffle;
+      qPos = null;
+      if (qHolderId && qHolderId !== prevHolderId) {
+        lockHolderId = qHolderId;
+        lockStepNo = stepNo;
+      }
+      await client.query(
+        "UPDATE participants SET stat_quaffle_pickups = COALESCE(stat_quaffle_pickups, 0) + 1 WHERE id = $1 AND game_id = $2",
+        [keeperIdAtQuaffle, gameId]
+      );
+    }
   }
 
   for (const p of participants) {
@@ -1206,13 +1301,15 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         const chaserId = occupantChaserByCoordAfter.get(to) || null;
         if (chaserId) {
           const receiver = participants.find((pp) => pp.id === chaserId) || null;
-          if (receiver && receiver.team === p.team) {
+          if (receiver) {
             nextHolderId = chaserId;
             nextPos = null;
-            await client.query("UPDATE participants SET stat_quaffle_passes = COALESCE(stat_quaffle_passes, 0) + 1 WHERE id = $1 AND game_id = $2", [
-              p.id,
-              gameId
-            ]);
+            if (receiver.team === p.team) {
+              await client.query("UPDATE participants SET stat_quaffle_passes = COALESCE(stat_quaffle_passes, 0) + 1 WHERE id = $1 AND game_id = $2", [
+                p.id,
+                gameId
+              ]);
+            }
           }
         }
       } else if (isChaserRole(p.role)) {
@@ -1726,6 +1823,9 @@ module.exports = {
   ensureGameStartedEffective,
   forceExpireTurnsIfTimedOutClient,
   autoEndTurnsInGame,
+  findPickupDefender,
+  collectStealCandidatesAgainstHolder,
+  collectPickupCandidatesAtCoord,
   canChaserSteal,
   canKeeperSteal
 };

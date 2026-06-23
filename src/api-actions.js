@@ -1090,10 +1090,11 @@ function addActionRoutes(router) {
       await client.query(
         `
           INSERT INTO duel_scores (duel_id, participant_id, score)
-          VALUES ($1, $2, NULL)
+          SELECT $1, x, NULL
+          FROM unnest($2::text[]) x
           ON CONFLICT DO NOTHING
         `,
-        [duelId, id]
+        [duelId, participantIds]
       );
       const myScoreRes = await client.query("SELECT score FROM duel_scores WHERE duel_id = $1 AND participant_id = $2 FOR UPDATE", [duelId, id]);
       if (myScoreRes.rows[0]?.score != null) {
@@ -1123,18 +1124,18 @@ function addActionRoutes(router) {
         }
       }
 
-      const scoresRes2 = await client.query("SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[])", [
+      let scoresRes2 = await client.query("SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[])", [
         duelId,
         participantIds
       ]);
-      const scoreById = new Map(scoresRes2.rows.map((r) => [r.participant_id, r.score]));
+      let scoreById = new Map(scoresRes2.rows.map((r) => [r.participant_id, r.score]));
       await client.query("UPDATE duels SET attacker_score = $2, defender_score = $3 WHERE id = $1", [
         duelId,
         scoreById.get(duel.attacker_id) ?? null,
         scoreById.get(duel.defender_id) ?? null
       ]);
 
-      const duelRes2 = await client.query(
+      let duelRes2 = await client.query(
         `
           SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
           FROM duels
@@ -1143,8 +1144,31 @@ function addActionRoutes(router) {
         `,
         [duelId]
       );
-      const duel2 = duelRes2.rows[0] || null;
-      const resolved = await resolveDuelIfReady(client, duel2);
+      let duel2 = duelRes2.rows[0] || null;
+      let resolved = await resolveDuelIfReady(client, duel2);
+      if (!resolved.resolved) {
+        await runBotsInGameClient(client, duel.game_id);
+        duelRes2 = await client.query(
+          `
+            SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
+            FROM duels
+            WHERE id = $1
+            FOR UPDATE
+          `,
+          [duelId]
+        );
+        duel2 = duelRes2.rows[0] || null;
+        if (duel2?.resolved_at) {
+          resolved = { resolved: true, winnerId: duel2.winner_id || null };
+        } else {
+          resolved = await resolveDuelIfReady(client, duel2);
+        }
+        scoresRes2 = await client.query("SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[])", [
+          duelId,
+          participantIds
+        ]);
+        scoreById = new Map(scoresRes2.rows.map((r) => [r.participant_id, r.score]));
+      }
       if (!resolved.resolved) {
         await client.query("COMMIT");
         return res.json({ resolved: false });

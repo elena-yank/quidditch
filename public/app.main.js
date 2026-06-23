@@ -84,6 +84,21 @@ async function refreshRoomOnce() {
   syncVoiceFromGameState(next).catch(() => {});
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+async function refreshUntilDuelSettles(duelId, attempts = 8, delayMs = 250) {
+  const id = String(duelId || "").trim();
+  if (!id) return;
+  for (let i = 0; i < attempts; i += 1) {
+    if (i > 0) await delay(delayMs);
+    await refreshRoomOnce();
+    const duel = state.gameState?.duel || null;
+    if (!duel || duel.id !== id || duel.resolvedAt) return;
+  }
+}
+
 function startRoomPolling() {
   stopRoomPolling();
   state.interval = setInterval(refreshRoomOnce, 2000);
@@ -1351,6 +1366,7 @@ async function bootstrap() {
       if (!myId) return;
       if (!state.duelUi || state.duelUi.phase !== "active") return;
       if (state.duelUi.submitted) return;
+      const duelId = state.duelUi.duelId;
 
       state.duelUi.submitted = true;
       stopDuelAnimation();
@@ -1364,7 +1380,7 @@ async function bootstrap() {
       }
       els.duelHint.textContent = `Твой результат: ${score}%. Ждём соперника…`;
 
-      const res = await api.submitSteal(myId, { duelId: state.duelUi.duelId, score });
+      const res = await api.submitSteal(myId, { duelId, score });
       if (!res.ok) {
         if (res.status === 403 && res.body?.error === "game_finished") {
           showToast("Игра уже завершена");
@@ -1377,7 +1393,7 @@ async function bootstrap() {
         return;
       }
 
-      await refreshRoomOnce();
+      await refreshUntilDuelSettles(duelId);
     });
 
     els.stealQuaffleBtn.addEventListener("click", async () => {

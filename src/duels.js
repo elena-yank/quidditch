@@ -241,13 +241,12 @@ function resolveQuaffleThrow({
     if (d === 0 || d > 6) return { ok: false };
     const receiver = (participants || []).find((pp) => {
       if (!pp || !isChaserRole(pp.role)) return false;
-      if (pp.team !== actor.team) return false;
       return getParticipantCoord(pp, teamA, teamB) === toCoord;
     }) || null;
     if (receiver) {
       nextHolderId = receiver.id;
       nextPos = null;
-      passActorId = actor.id;
+      if (receiver.team === actor.team) passActorId = actor.id;
     }
     return {
       ok: true,

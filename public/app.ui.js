@@ -635,6 +635,7 @@ function openDuelOverlay(duel, myId) {
   if (state.duelUi && state.duelUi.duelId === duel.id && state.duelUi.phase === "active" && !duel.resolvedAt) return;
   const startedAtMs = parseServerTimeMs(duel.startedAt);
   if (!Number.isFinite(startedAtMs)) return;
+  const isResolved = Boolean(duel.resolvedAt);
 
   const participantIds = Array.isArray(duel.participantIds)
     ? duel.participantIds.map((x) => String(x || "").trim()).filter(Boolean)
@@ -652,17 +653,25 @@ function openDuelOverlay(duel, myId) {
       duelId: duel.id,
       startedAtMs,
       periodMs: 2200,
-      phase: duel.resolvedAt ? "resolved" : "active",
+      phase: isResolved ? "resolved" : "active",
       submitted: false,
       currentPercent: 0,
       raf: null
     };
+  } else {
+    state.duelUi.startedAtMs = startedAtMs;
+    state.duelUi.phase = isResolved ? "resolved" : "active";
+    if (!isResolved) {
+      state.duelUi.submitted = false;
+      els.duelResult.textContent = "";
+      els.duelHint.textContent = "Нажми по прогресс-бару как можно ближе к 100%";
+    }
   }
 
   const barFill = ensureDuelBarFill();
   if (barFill) barFill.style.width = "0%";
 
-  if (duel.resolvedAt) {
+  if (isResolved) {
     stopDuelAnimation();
     const scores = Array.isArray(duel.scores) ? duel.scores : null;
     const parts = [];
