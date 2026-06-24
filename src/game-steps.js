@@ -33,6 +33,7 @@ const {
   canKeeperThrow
 } = require("./game-logic");
 const { pool } = require("./db");
+const { insertGameEvent } = require("./game-events");
 const { insertDuelWithParticipants, resolveDuelIfReady, setMaybeAdvanceStep } = require("./duels");
 
 // Устанавливаем функцию для циклического импорта
@@ -95,7 +96,7 @@ async function ensureGameStartedEffective(client, gameId, startedRaw) {
   return Boolean(startedRaw);
 }
 
-function findPickupDefender({
+function collectPickupDefenders({
   participants,
   moveToByIdBeforeActions,
   pickerId,
@@ -104,9 +105,8 @@ function findPickupDefender({
   positionsById,
   includePostMovePickup
 }) {
-  let defenderId = null;
-  let bestD = Infinity;
-  if (!pickerTeam) return null;
+  const defenderIds = [];
+  if (!pickerTeam) return defenderIds;
   for (const pp of participants || []) {
     if (pp.id === pickerId) continue;
     if (Boolean(pp.stunned)) continue;
@@ -124,12 +124,9 @@ function findPickupDefender({
     if (!from2) continue;
     const d2 = chebyshevDistance(from2, qCoord);
     if (d2 == null || d2 > 1) continue;
-    if (d2 < bestD) {
-      bestD = d2;
-      defenderId = pp.id;
-    }
+    defenderIds.push(pp.id);
   }
-  return defenderId;
+  return defenderIds;
 }
 
 function collectStealCandidatesAgainstHolder({
@@ -180,6 +177,12 @@ function collectPickupCandidatesAtCoord({ participants, qCoord, positionsById, a
     if (d != null && d <= 1) pickupCandidates.push(p.id);
   }
   return pickupCandidates;
+}
+
+function isParticipantStunnedThisStep(participant, hitStunnedIds) {
+  if (!participant) return false;
+  if (Boolean(participant.stunned)) return true;
+  return hitStunnedIds instanceof Set && hitStunnedIds.has(participant.id);
 }
 
 async function expireOldTurns(gameId) {
@@ -392,11 +395,14 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     actionPosById.set(p.id, pos);
   }
 
+  const hitStunnedIds = new Set();
+  const isStunnedNow = (participant) => isParticipantStunnedThisStep(participant, hitStunnedIds);
+
   const moveToByIdBeforeActions = new Map();
   {
     const claimedTargets = new Set();
     for (const p of participants) {
-      if (Boolean(p.stunned)) continue;
+      if (isStunnedNow(p)) continue;
       const from = fromById.get(p.id);
       const to = normalizeCoord(p.planned_to);
       if (!from || !to) continue;
@@ -487,7 +493,6 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
   let snitchCaughtStepNo = gameRow?.snitch_caught_step_no != null ? Number(gameRow.snitch_caught_step_no) : null;
   let snitchRevealCount = gameRow?.snitch_reveal_count != null ? Number(gameRow.snitch_reveal_count) : 0;
   let snitchHideCount = gameRow?.snitch_hide_count != null ? Number(gameRow.snitch_hide_count) : 0;
-  const hitStunnedIds = new Set();
   const bludgersHitThisStep = new Set();
   let scoreA = gameRow?.score_a != null ? Number(gameRow.score_a) : 0;
   let scoreB = gameRow?.score_b != null ? Number(gameRow.score_b) : 0;
@@ -518,7 +523,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const pickerId = pickupCandidates[0];
       const picker = participants.find((pp) => pp.id === pickerId) || null;
       const pickerTeam = picker?.team || null;
-      const defenderId = findPickupDefender({
+      const defenderIds = collectPickupDefenders({
         participants,
         moveToByIdBeforeActions,
         pickerId,
@@ -528,14 +533,14 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         includePostMovePickup: true
       });
 
-      if (defenderId) {
+      if (defenderIds.length > 0) {
         const duelId = nanoidId();
         const insCount = await insertDuelWithParticipants(client, {
           duelId,
           gameId,
           attackerId: pickerId,
-          defenderId,
-          participantIds: [pickerId, defenderId],
+          defenderId: defenderIds[0],
+          participantIds: [pickerId, ...defenderIds],
           kind: "pickup",
           targetPos: qCoord,
           createdStepNo: stepNo
@@ -556,11 +561,19 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         pickerId,
         gameId
       ]);
+      await insertGameEvent(client, {
+        gameId,
+        stepNo,
+        kind: "quaffle_pickup",
+        actorId: pickerId,
+        targetPos: qCoord,
+        meta: { phase: "pre", finalHolderId: pickerId, finalPos: null }
+      });
     }
   }
 
   for (const p of participants) {
-    if (Boolean(p.stunned)) continue;
+    if (isStunnedNow(p)) continue;
     const actionType = normalizePlannedActionType(p.planned_action_type);
     if (!actionType) continue;
     const allowPreMove = Boolean(p.planned_action_first);
@@ -618,7 +631,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const duelTarget = `b${targetIdx}:pre`;
       const contenders = [];
       for (const pp of participants) {
-        if (Boolean(pp.stunned)) continue;
+        if (isStunnedNow(pp)) continue;
         if (!Boolean(pp.planned_action_first)) continue;
         const ppType = normalizePlannedActionType(pp.planned_action_type);
         if (ppType !== "hit_bludger") continue;
@@ -743,6 +756,14 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         p.id,
         gameId
       ]);
+      await insertGameEvent(client, {
+        gameId,
+        stepNo,
+        kind: "quaffle_pass",
+        actorId: p.id,
+        targetPos: to,
+        meta: { phase: "pre", receiverId, fromPos: from, toPos: to }
+      });
       continue;
     }
 
@@ -837,6 +858,25 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         lockHolderId = qHolderId;
         lockStepNo = stepNo;
       }
+      await insertGameEvent(client, {
+        gameId,
+        stepNo,
+        kind: "quaffle_throw",
+        actorId: p.id,
+        targetPos: to,
+        meta: {
+          phase: "pre",
+          fromPos: from,
+          toPos: to,
+          receiverId: nextHolderId,
+          finalHolderId: nextHolderId,
+          finalPos: nextPos,
+          outcome:
+            pendingGoalResolution && pendingGoalResolution.actorId === p.id ? "pending_goal_resolution" :
+            nextHolderId && nextHolderId !== p.id ? "caught_by_player" :
+            nextPos ? "landed" : "released"
+        }
+      });
     }
   }
 
@@ -864,7 +904,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     const moveToById = new Map();
     const claimedTargets = new Set();
     for (const p of participants) {
-      const stunned = Boolean(p.stunned);
+      const stunned = isStunnedNow(p);
       if (stunned) continue;
       const from = fromById.get(p.id);
       const to = normalizeCoord(p.planned_to);
@@ -961,7 +1001,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const pickerId = pickupCandidates[0];
       const picker = participants.find((pp) => pp.id === pickerId) || null;
       const pickerTeam = picker?.team || null;
-      const defenderId = findPickupDefender({
+      const defenderIds = collectPickupDefenders({
         participants,
         moveToByIdBeforeActions,
         pickerId,
@@ -971,14 +1011,14 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         includePostMovePickup: false
       });
 
-      if (defenderId) {
+      if (defenderIds.length > 0) {
         const duelId = nanoidId();
         const insCount = await insertDuelWithParticipants(client, {
           duelId,
           gameId,
           attackerId: pickerId,
-          defenderId,
-          participantIds: [pickerId, defenderId],
+          defenderId: defenderIds[0],
+          participantIds: [pickerId, ...defenderIds],
           kind: "pickup",
           targetPos: qCoord,
           createdStepNo: stepNo
@@ -999,6 +1039,14 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         pickerId,
         gameId
       ]);
+      await insertGameEvent(client, {
+        gameId,
+        stepNo,
+        kind: "quaffle_pickup",
+        actorId: pickerId,
+        targetPos: qCoord,
+        meta: { phase: "post", finalHolderId: pickerId, finalPos: null }
+      });
     }
   }
 
@@ -1046,19 +1094,52 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
           keeperIdAtTarget,
           gameId
         ]);
+        await insertGameEvent(client, {
+          gameId,
+          stepNo,
+          kind: "quaffle_throw_result",
+          actorId: pendingGoalResolution.actorId,
+          targetPos,
+          meta: {
+            outcome: "saved_by_keeper",
+            keeperId: keeperIdAtTarget,
+            finalHolderId: keeperIdAtTarget,
+            finalPos: null
+          }
+        });
       } else {
         if (pendingGoalResolution.scoringTeam === gameForSpawn.team_a) scoreA += 10;
         else if (pendingGoalResolution.scoringTeam === gameForSpawn.team_b) scoreB += 10;
         if (pendingGoalResolution.keeperId) {
-          await client.query(
-            "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            [nanoidId(), gameId, stepNo, "goal", pendingGoalResolution.keeperId, null, targetPos]
-          );
+          await insertGameEvent(client, {
+            gameId,
+            stepNo,
+            kind: "goal",
+            actorId: pendingGoalResolution.keeperId,
+            targetPos,
+            meta: {
+              shooterId: pendingGoalResolution.actorId,
+              keeperId: pendingGoalResolution.keeperId
+            }
+          });
         }
         await client.query("UPDATE participants SET stat_goals_scored = COALESCE(stat_goals_scored, 0) + 1 WHERE id = $1 AND game_id = $2", [
           pendingGoalResolution.actorId,
           gameId
         ]);
+        await insertGameEvent(client, {
+          gameId,
+          stepNo,
+          kind: "quaffle_throw_result",
+          actorId: pendingGoalResolution.actorId,
+          targetPos,
+          meta: {
+            outcome: "goal",
+            keeperId: pendingGoalResolution.keeperId,
+            finalHolderId: null,
+            finalPos: targetPos
+          }
+        });
       }
       pendingGoalResolution = null;
     }
@@ -1079,11 +1160,19 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         "UPDATE participants SET stat_quaffle_pickups = COALESCE(stat_quaffle_pickups, 0) + 1 WHERE id = $1 AND game_id = $2",
         [keeperIdAtQuaffle, gameId]
       );
+      await insertGameEvent(client, {
+        gameId,
+        stepNo,
+        kind: "quaffle_pickup",
+        actorId: keeperIdAtQuaffle,
+        targetPos: qCoord,
+        meta: { phase: "post_auto_keeper", finalHolderId: keeperIdAtQuaffle, finalPos: null }
+      });
     }
   }
 
   for (const p of participants) {
-    if (Boolean(p.stunned)) continue;
+    if (isStunnedNow(p)) continue;
     const actionType = normalizePlannedActionType(p.planned_action_type);
     if (!actionType) continue;
     if (Boolean(p.planned_action_first)) continue;
@@ -1140,7 +1229,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       const duelTarget = `b${targetIdx}:post`;
       const contenders = [];
       for (const pp of participants) {
-        if (Boolean(pp.stunned)) continue;
+        if (isStunnedNow(pp)) continue;
         if (Boolean(pp.planned_action_first)) continue;
         const ppType = normalizePlannedActionType(pp.planned_action_type);
         if (ppType !== "hit_bludger") continue;
@@ -1267,6 +1356,14 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         p.id,
         gameId
       ]);
+      await insertGameEvent(client, {
+        gameId,
+        stepNo,
+        kind: "quaffle_pass",
+        actorId: p.id,
+        targetPos: to,
+        meta: { phase: "post", receiverId, fromPos: from, toPos: to }
+      });
       continue;
     }
 
@@ -1332,10 +1429,17 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
           else if (isTeamB) scoreB += 10;
           const keeper = defenderTeam ? participants.find((pp) => pp.team === defenderTeam && isKeeperRole(pp.role)) : null;
           if (keeper?.id) {
-            await client.query(
-              "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-              [nanoidId(), gameId, stepNo, "goal", keeper.id, null, to]
-            );
+            await insertGameEvent(client, {
+              gameId,
+              stepNo,
+              kind: "goal",
+              actorId: keeper.id,
+              targetPos: to,
+              meta: {
+                shooterId: p.id,
+                keeperId: keeper.id
+              }
+            });
           }
           await client.query("UPDATE participants SET stat_goals_scored = COALESCE(stat_goals_scored, 0) + 1 WHERE id = $1 AND game_id = $2", [
             p.id,
@@ -1356,6 +1460,25 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
         lockHolderId = qHolderId;
         lockStepNo = stepNo;
       }
+      await insertGameEvent(client, {
+        gameId,
+        stepNo,
+        kind: "quaffle_throw",
+        actorId: p.id,
+        targetPos: to,
+        meta: {
+          phase: "post",
+          fromPos: from,
+          toPos: to,
+          receiverId: nextHolderId,
+          finalHolderId: nextHolderId,
+          finalPos: nextPos,
+          outcome:
+            nextHolderId && nextHolderId !== p.id ? "caught_by_player" :
+            nextPos && (!isChaserRole(p.role) || !GOALS_LEFT_SET.has(to) && !GOALS_RIGHT_SET.has(to)) ? "landed" :
+            nextPos ? "goal" : "released"
+        }
+      });
     }
   }
 
@@ -1435,7 +1558,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     const shouldRespawn = snitchCaughtStepNo != null && stepNo >= snitchCaughtStepNo + 3;
     if (shouldRespawn) {
       const seekerPositions = participants
-        .filter((p) => isSeekerRole(p.role) && !Boolean(p.stunned))
+        .filter((p) => isSeekerRole(p.role) && !isStunnedNow(p))
         .map((p) => posById.get(p.id) || getPositionForParticipant(p, gameForSpawn) || null)
         .filter(Boolean);
       const seekerA = seekerPositions[0] || null;
@@ -1461,7 +1584,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
 
   if (!nextSnitchCaughtById) {
     const seekerDistances = participants
-      .filter((p) => isSeekerRole(p.role) && !Boolean(p.stunned))
+      .filter((p) => isSeekerRole(p.role) && !isStunnedNow(p))
       .map((p) => {
         const from = posById.get(p.id);
         if (!from) return null;
@@ -1823,9 +1946,10 @@ module.exports = {
   ensureGameStartedEffective,
   forceExpireTurnsIfTimedOutClient,
   autoEndTurnsInGame,
-  findPickupDefender,
+  collectPickupDefenders,
   collectStealCandidatesAgainstHolder,
   collectPickupCandidatesAtCoord,
   canChaserSteal,
-  canKeeperSteal
+  canKeeperSteal,
+  isParticipantStunnedThisStep
 };

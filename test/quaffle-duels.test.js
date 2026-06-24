@@ -15,8 +15,10 @@ const assert = require("node:assert/strict");
 const {
   collectStealCandidatesAgainstHolder,
   collectPickupCandidatesAtCoord,
-  findPickupDefender
+  collectPickupDefenders,
+  isParticipantStunnedThisStep
 } = require("../src/game-steps");
+const { pickDuelWinner } = require("../src/duels");
 
 function p(id, team, role, extra = {}) {
   return {
@@ -160,15 +162,17 @@ test("pickup duel collects all adjacent pre-move contenders around a free quaffl
   assert.deepEqual(candidates, ["a", "b", "c"]);
 });
 
-test("pickup defender selection uses post-move pickup positions and chooses the nearest enemy", () => {
+test("pickup defender selection uses post-move pickup positions and includes every eligible enemy", () => {
   const picker = p("picker", "A", "chaser1", { planned_action_type: "pickup", planned_action_first: false });
   const enemyNear = p("enemyNear", "B", "keeper", { planned_action_type: "keeper_pickup", planned_action_first: false });
+  const enemyAlsoNear = p("enemyAlsoNear", "B", "chaser2");
   const enemyFar = p("enemyFar", "B", "chaser2");
   const ally = p("ally", "A", "keeper");
 
   const positions = new Map([
     ["picker", "D5"],
     ["enemyNear", "A1"],
+    ["enemyAlsoNear", "E7"],
     ["enemyFar", "D9"],
     ["ally", "D6"]
   ]);
@@ -176,8 +180,8 @@ test("pickup defender selection uses post-move pickup positions and chooses the 
     ["enemyNear", "D8"]
   ]);
 
-  const defenderId = findPickupDefender({
-    participants: [picker, enemyNear, enemyFar, ally],
+  const defenderIds = collectPickupDefenders({
+    participants: [picker, enemyNear, enemyAlsoNear, enemyFar, ally],
     moveToByIdBeforeActions: moved,
     pickerId: "picker",
     pickerTeam: "A",
@@ -186,5 +190,52 @@ test("pickup defender selection uses post-move pickup positions and chooses the 
     includePostMovePickup: true
   });
 
-  assert.equal(defenderId, "enemyNear");
+  assert.deepEqual(defenderIds, ["enemyNear", "enemyAlsoNear"]);
+});
+
+test("fresh bludger stun marks a player inactive for the rest of the current step", () => {
+  const participant = p("runner", "A", "chaser1");
+  const hitStunnedIds = new Set(["runner"]);
+
+  assert.equal(isParticipantStunnedThisStep(participant, hitStunnedIds), true);
+});
+
+test("tie for best steal score keeps quaffle with current holder", () => {
+  const scoreById = new Map([
+    ["holder", 72],
+    ["stealer1", 90],
+    ["stealer2", 90]
+  ]);
+
+  const outcome = pickDuelWinner({
+    kind: "steal",
+    participantIds: ["holder", "stealer1", "stealer2"],
+    scoreById,
+    attackerId: "stealer1",
+    defenderId: "holder"
+  });
+
+  assert.equal(outcome.winnerId, "holder");
+  assert.equal(outcome.topTie, true);
+  assert.equal(outcome.tiePolicy, "holder_keeps_control");
+});
+
+test("tie for best pickup score leaves free quaffle on the field", () => {
+  const scoreById = new Map([
+    ["pickerA", 88],
+    ["pickerB", 88],
+    ["defender", 50]
+  ]);
+
+  const outcome = pickDuelWinner({
+    kind: "pickup",
+    participantIds: ["pickerA", "pickerB", "defender"],
+    scoreById,
+    attackerId: "pickerA",
+    defenderId: "defender"
+  });
+
+  assert.equal(outcome.winnerId, null);
+  assert.equal(outcome.topTie, true);
+  assert.equal(outcome.tiePolicy, "free_quaffle_remains");
 });

@@ -161,17 +161,40 @@ function addCoreRoutes(router) {
       participantsRes.rows = participantsRes2.rows;
     }
 
-    const duelRes = await pool.query(
-      `
-        SELECT id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
-        FROM duels
-        WHERE game_id = $1 AND (resolved_at IS NULL OR resolved_at > NOW() - INTERVAL '10 seconds')
-        ORDER BY started_at DESC
-        LIMIT 1
-      `,
-      [game.id]
-    );
-    const duel = duelRes.rows[0] || null;
+    const viewerAuth = await authenticateViewerRequest(req, viewerId);
+    if (!viewerAuth.ok) return res.status(viewerAuth.status || 401).json({ error: viewerAuth.error || "invalid_session" });
+    const viewer = viewerAuth.viewer || null;
+    if (viewer && viewer.game_id !== game.id) return res.status(401).json({ error: "invalid_session" });
+
+    let duel = null;
+    if (viewer) {
+      const viewerDuelRes = await pool.query(
+        `
+          SELECT id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
+          FROM duels
+          WHERE game_id = $1
+            AND (resolved_at IS NULL OR resolved_at > NOW() - INTERVAL '10 seconds')
+            AND $2 = ANY(COALESCE(participant_ids, ARRAY[attacker_id, defender_id]))
+          ORDER BY CASE WHEN resolved_at IS NULL THEN 0 ELSE 1 END, started_at DESC
+          LIMIT 1
+        `,
+        [game.id, viewer.id]
+      );
+      duel = viewerDuelRes.rows[0] || null;
+    }
+    if (!duel) {
+      const duelRes = await pool.query(
+        `
+          SELECT id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id
+          FROM duels
+          WHERE game_id = $1 AND (resolved_at IS NULL OR resolved_at > NOW() - INTERVAL '10 seconds')
+          ORDER BY started_at DESC
+          LIMIT 1
+        `,
+        [game.id]
+      );
+      duel = duelRes.rows[0] || null;
+    }
 
     const eventsRes = await pool.query(
       "SELECT id, kind, actor_id, step_no, bludger_idx, target_pos, created_at FROM game_events WHERE game_id = $1 ORDER BY created_at DESC LIMIT 20",
@@ -214,10 +237,6 @@ function addCoreRoutes(router) {
       }
     }
 
-    const viewerAuth = await authenticateViewerRequest(req, viewerId);
-    if (!viewerAuth.ok) return res.status(viewerAuth.status || 401).json({ error: viewerAuth.error || "invalid_session" });
-    const viewer = viewerAuth.viewer || null;
-    if (viewer && viewer.game_id !== game.id) return res.status(401).json({ error: "invalid_session" });
     const revealPlansToViewer = Boolean(viewer && !viewer.is_observer);
     const viewerTeamForChat = viewer && !viewer.is_observer ? viewer.team : null;
     const chatMessages = (chatRes.rows || [])
@@ -622,7 +641,7 @@ function addCoreRoutes(router) {
     if (!game) return res.status(404).json({ error: "not_found" });
 
     const snapshotsRes = await pool.query("SELECT step_no, state FROM game_state_snapshots WHERE game_id = $1 ORDER BY step_no ASC", [game.id]);
-    const eventsRes = await pool.query("SELECT id, kind, actor_id, step_no, bludger_idx, target_pos, created_at FROM game_events WHERE game_id = $1 ORDER BY created_at ASC", [game.id]);
+    const eventsRes = await pool.query("SELECT id, kind, actor_id, step_no, bludger_idx, target_pos, meta, created_at FROM game_events WHERE game_id = $1 ORDER BY created_at ASC", [game.id]);
     const participantsRes = await pool.query("SELECT id, nickname, team, role FROM participants WHERE game_id = $1", [game.id]);
     const participantsById = Object.fromEntries(participantsRes.rows.map((p) => [p.id, { nickname: p.nickname, team: p.team, role: p.role }]));
 
@@ -635,6 +654,7 @@ function addCoreRoutes(router) {
         stepNo: row.step_no,
         bludgerIdx: row.bludger_idx,
         targetPos: row.target_pos,
+        meta: row.meta || null,
         createdAt: row.created_at
       })),
       participantsById

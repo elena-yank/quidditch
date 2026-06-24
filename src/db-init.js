@@ -97,9 +97,11 @@ async function initDb() {
         actor_id TEXT NULL,
         bludger_idx SMALLINT NULL,
         target_pos TEXT NULL,
+        meta JSONB NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+    await client.query(`ALTER TABLE game_events ADD COLUMN IF NOT EXISTS meta JSONB`);
     await client.query(`CREATE INDEX IF NOT EXISTS game_events_game_created_idx ON game_events (game_id, created_at DESC)`);
     
     await client.query(`

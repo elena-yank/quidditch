@@ -1577,6 +1577,17 @@ async function bootstrap() {
           return replaceAllPlain(tpl, "[Имя игрока]", nickFor(keeper));
         }
 
+        function participantLabel(participantId) {
+          const p = participantId ? participantsById?.[participantId] || null : null;
+          return p?.nickname || "Игрок";
+        }
+
+        function scoreListText(scores) {
+          return (Array.isArray(scores) ? scores : [])
+            .map((row) => `${participantLabel(row?.participantId)}: ${row?.score ?? "—"}%`)
+            .join(", ");
+        }
+
         function escapeHtml(value) {
           return String(value == null ? "" : value)
             .replace(/&/g, "&amp;")
@@ -1707,6 +1718,37 @@ async function bootstrap() {
               const nick = actor?.nickname || "Игрок";
 
               switch (evt.kind) {
+                case "quaffle_pickup":
+                  text = `${nick} (${roleText}) подобрал квоффл${evt.targetPos ? ` у клетки ${evt.targetPos}` : ""}`;
+                  break;
+                case "quaffle_pass":
+                  text = `${nick} (${roleText}) отдал пас в ${evt.targetPos || "—"} игроку ${participantLabel(evt.meta?.receiverId)}`;
+                  break;
+                case "quaffle_throw":
+                  text = `${nick} (${roleText}) бросил квоффл из ${evt.meta?.fromPos || "—"} в ${evt.meta?.toPos || evt.targetPos || "—"}; исход: ${evt.meta?.outcome || "неизвестно"}`;
+                  if (evt.meta?.receiverId) text += `; мяч у ${participantLabel(evt.meta.receiverId)}`;
+                  break;
+                case "quaffle_throw_result":
+                  text = `${nick} (${roleText}) завершил бросок квоффла: ${evt.meta?.outcome || "неизвестно"}`;
+                  if (evt.meta?.keeperId) text += `; вратарь: ${participantLabel(evt.meta.keeperId)}`;
+                  if (evt.meta?.finalHolderId) text += `; мяч у ${participantLabel(evt.meta.finalHolderId)}`;
+                  if (evt.meta?.finalPos) text += `; мяч в ${evt.meta.finalPos}`;
+                  break;
+                case "quaffle_duel_score":
+                  text = `${nick} (${roleText}) участвовал в борьбе за квоффл: ${evt.meta?.score ?? "—"}%`;
+                  if (evt.meta?.duelKind) text += `; тип: ${evt.meta.duelKind}`;
+                  break;
+                case "quaffle_duel_result":
+                  text = `Борьба за квоффл завершена`;
+                  if (evt.meta?.duelKind) text += ` (${evt.meta.duelKind})`;
+                  if (evt.meta?.winnerId) text += `; победитель: ${participantLabel(evt.meta.winnerId)}`;
+                  if (evt.meta?.topTie) text += `; ничья лидеров: ${evt.meta.tiedTopIds?.map(participantLabel).join(", ") || "да"}`;
+                  if (evt.meta?.tiePolicy) text += `; правило: ${evt.meta.tiePolicy}`;
+                  if (evt.meta?.scores) text += `; результаты: ${scoreListText(evt.meta.scores)}`;
+                  if (evt.meta?.outcome) text += `; исход: ${evt.meta.outcome}`;
+                  if (evt.meta?.finalHolderId) text += `; мяч у ${participantLabel(evt.meta.finalHolderId)}`;
+                  if (evt.meta?.finalPos) text += `; мяч в ${evt.meta.finalPos}`;
+                  break;
                 case "hit_bludger":
                   text = `${nick} (${roleText}) ударил бладжер ${evt.bludgerIdx || ""} в ${evt.targetPos || ""}`;
                   break;
@@ -1739,6 +1781,7 @@ async function bootstrap() {
                   break;
                 default:
                   text = `${evt.kind}: ${nick} (${roleText})`;
+                  if (evt.meta?.scores) text += `; scores: ${scoreListText(evt.meta.scores)}`;
               }
 
               htmlContent += `<li class="event-item">${text}</li>`;

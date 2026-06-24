@@ -1,6 +1,7 @@
 const { nanoidId, TURN_TIMEOUT_MS, GOALS_LEFT_SET, GOALS_RIGHT_SET } = require("./constants");
 const { uniqueTextArray, botScoreForDuel, normalizeCoord } = require("./utils");
 const { pool } = require("./db");
+const { insertGameEvent } = require("./game-events");
 const {
   isChaserRole,
   isKeeperRole,
@@ -17,6 +18,46 @@ function stableIndexFromId(id, mod) {
   for (let i = 0; i < s.length; i += 1) acc = (acc + s.charCodeAt(i)) | 0;
   const n = Math.abs(acc);
   return n % m;
+}
+
+function pickDuelWinner({ kind, participantIds, scoreById, attackerId, defenderId }) {
+  let bestScore = -Infinity;
+  let bestIds = [];
+  for (const pid of participantIds) {
+    const s = Number(scoreById.get(pid));
+    if (!Number.isFinite(s)) continue;
+    if (s > bestScore) {
+      bestScore = s;
+      bestIds = [pid];
+    } else if (s === bestScore) {
+      bestIds.push(pid);
+    }
+  }
+  bestIds.sort();
+  const topTie = bestIds.length > 1;
+
+  let winnerId = bestIds[0] || attackerId || defenderId || null;
+  let tiePolicy = null;
+  if (topTie) {
+    if (kind === "steal" || kind === "throw_steal") {
+      winnerId = defenderId || attackerId || null;
+      tiePolicy = "holder_keeps_control";
+    } else if (kind === "pickup") {
+      winnerId = null;
+      tiePolicy = "free_quaffle_remains";
+    } else if (kind === "snitch") {
+      winnerId = null;
+      tiePolicy = "snitch_remains_free";
+    }
+  }
+
+  return {
+    winnerId,
+    bestScore,
+    bestIds,
+    topTie,
+    tiePolicy
+  };
 }
 
 async function expireOldDuels(gameId) {
@@ -141,20 +182,14 @@ async function expireOldDuels(gameId) {
     const resolved = await resolveDuelIfReady(client, duel2);
 
     if (!resolved.resolved) {
-      let bestScore = -Infinity;
-      let bestIds = [];
-      for (const pid of participantIds) {
-        const s = Number(scoreById.get(pid));
-        if (!Number.isFinite(s)) continue;
-        if (s > bestScore) {
-          bestScore = s;
-          bestIds = [pid];
-        } else if (s === bestScore) {
-          bestIds.push(pid);
-        }
-      }
-      bestIds.sort();
-      const winnerId = bestIds[0] || duel.defender_id || duel.attacker_id;
+      const outcome = pickDuelWinner({
+        kind,
+        participantIds,
+        scoreById,
+        attackerId: duel.attacker_id,
+        defenderId: duel.defender_id
+      });
+      const winnerId = outcome.winnerId;
       await client.query(
         `
           UPDATE duels
@@ -330,20 +365,18 @@ async function resolveDuelIfReady(client, duelRow) {
     if (scoreById.get(pid) == null) return { resolved: false };
   }
 
-  let bestScore = -Infinity;
-  let bestIds = [];
-  for (const pid of participantIds) {
-    const s = Number(scoreById.get(pid));
-    if (!Number.isFinite(s)) continue;
-    if (s > bestScore) {
-      bestScore = s;
-      bestIds = [pid];
-    } else if (s === bestScore) {
-      bestIds.push(pid);
-    }
-  }
-  bestIds.sort();
-  const winnerId = bestIds[0] || duelRow.attacker_id || duelRow.defender_id || null;
+  const outcome = pickDuelWinner({
+    kind,
+    participantIds,
+    scoreById,
+    attackerId: duelRow.attacker_id,
+    defenderId: duelRow.defender_id
+  });
+  const winnerId = outcome.winnerId;
+  const bestScore = outcome.bestScore;
+  const bestIds = outcome.bestIds;
+  const topTie = outcome.topTie;
+  const tiePolicy = outcome.tiePolicy;
 
   const attackerScore = scoreById.get(duelRow.attacker_id) ?? null;
   const defenderScore = scoreById.get(duelRow.defender_id) ?? null;
@@ -363,9 +396,31 @@ async function resolveDuelIfReady(client, duelRow) {
   const qPos = normalizeCoord(gameRes.rows[0]?.quaffle_pos) || "D7";
   const stealCooldownStepNo0 =
     gameRes.rows[0]?.quaffle_steal_cooldown_step_no != null ? Number(gameRes.rows[0].quaffle_steal_cooldown_step_no) : null;
+  const scores = participantIds.map((pid) => ({ participantId: pid, score: scoreById.get(pid) ?? null }));
+
+  if (kind === "pickup" || kind === "steal" || kind === "throw_steal") {
+    for (const pid of participantIds) {
+      await insertGameEvent(client, {
+        gameId: duelRow.game_id,
+        stepNo,
+        kind: "quaffle_duel_score",
+        actorId: pid,
+        targetPos: kind === "pickup" ? (normalizeCoord(duelRow.target_pos) || qPos) : null,
+        meta: {
+          duelId: duelRow.id,
+          duelKind: kind,
+          score: scoreById.get(pid) ?? null,
+          bestScore,
+          isTopScore: bestIds.includes(pid),
+          tiedTopIds: bestIds,
+          currentHolderId: duelRow.defender_id || qHolderId || null
+        }
+      });
+    }
+  }
 
   if (kind === "snitch") {
-    if (!alreadyCaughtById) {
+    if (!topTie && winnerId && !alreadyCaughtById) {
       const winnerRes = await client.query("SELECT team FROM participants WHERE id = $1 AND game_id = $2 FOR UPDATE", [winnerId, duelRow.game_id]);
       const winnerTeam = winnerRes.rows[0]?.team || null;
       let scoreA = scoreA0;
@@ -394,23 +449,43 @@ async function resolveDuelIfReady(client, duelRow) {
     }
   } else if (kind === "pickup") {
     const expected = normalizeCoord(duelRow.target_pos) || qPos;
-    const upd = await client.query(
-      `
-        UPDATE games
-        SET quaffle_holder_id = $2,
-            quaffle_pos = NULL,
-            quaffle_lock_holder_id = $2,
-            quaffle_lock_step_no = $3
-        WHERE id = $1 AND quaffle_holder_id IS NULL AND quaffle_pos = $4
-      `,
-      [duelRow.game_id, winnerId, stepNo, expected]
-    );
-    if ((upd.rowCount || 0) > 0) {
-      await client.query("UPDATE participants SET stat_quaffle_pickups = COALESCE(stat_quaffle_pickups, 0) + 1 WHERE id = $1 AND game_id = $2", [
-        winnerId,
-        duelRow.game_id
-      ]);
+    if (!topTie && winnerId) {
+      const upd = await client.query(
+        `
+          UPDATE games
+          SET quaffle_holder_id = $2,
+              quaffle_pos = NULL,
+              quaffle_lock_holder_id = $2,
+              quaffle_lock_step_no = $3
+          WHERE id = $1 AND quaffle_holder_id IS NULL AND quaffle_pos = $4
+        `,
+        [duelRow.game_id, winnerId, stepNo, expected]
+      );
+      if ((upd.rowCount || 0) > 0) {
+        await client.query("UPDATE participants SET stat_quaffle_pickups = COALESCE(stat_quaffle_pickups, 0) + 1 WHERE id = $1 AND game_id = $2", [
+          winnerId,
+          duelRow.game_id
+        ]);
+      }
     }
+    await insertGameEvent(client, {
+      gameId: duelRow.game_id,
+      stepNo,
+      kind: "quaffle_duel_result",
+      actorId: winnerId,
+      targetPos: expected,
+      meta: {
+        duelId: duelRow.id,
+        duelKind: kind,
+        winnerId,
+        topTie,
+        tiedTopIds: bestIds,
+        tiePolicy,
+        scores,
+        finalHolderId: topTie ? null : winnerId,
+        finalPos: topTie ? expected : null
+      }
+    });
   } else if (kind === "hit_bludger") {
     // Ничего не делаем, обработка была раньше
   } else if (kind === "throw_steal") {
@@ -513,11 +588,43 @@ async function resolveDuelIfReady(client, duelRow) {
         ]);
       }
       if (throwResult.goalEventKeeperId) {
-        await client.query(
-          "INSERT INTO game_events (id, game_id, step_no, kind, actor_id, bludger_idx, target_pos) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-          [nanoidId(), duelRow.game_id, stepNo, "goal", throwResult.goalEventKeeperId, null, throwResult.nextPos]
-        );
+        await insertGameEvent(client, {
+          gameId: duelRow.game_id,
+          stepNo,
+          kind: "goal",
+          actorId: throwResult.goalEventKeeperId,
+          targetPos: throwResult.nextPos,
+          meta: {
+            shooterId: throwActor?.id || expectedHolderId || null,
+            keeperId: throwResult.goalEventKeeperId,
+            finalHolderId: throwResult.nextHolderId || null
+          }
+        });
       }
+      await insertGameEvent(client, {
+        gameId: duelRow.game_id,
+        stepNo,
+        kind: "quaffle_duel_result",
+        actorId: winnerId,
+        targetPos: throwTarget,
+        meta: {
+          duelId: duelRow.id,
+          duelKind: kind,
+          winnerId,
+          topTie,
+          tiedTopIds: bestIds,
+          tiePolicy,
+          scores,
+          throwContinued: true,
+          finalHolderId: throwResult.nextHolderId || null,
+          finalPos: throwResult.nextPos || null,
+          outcome:
+            throwResult.goalActorId ? "goal" :
+            throwResult.saveActorId ? "saved_by_keeper" :
+            throwResult.nextHolderId ? "caught_by_player" :
+            "landed"
+        }
+      });
     } else {
       const upd = await client.query(
         `
@@ -537,29 +644,69 @@ async function resolveDuelIfReady(client, duelRow) {
           duelRow.game_id
         ]);
       }
+      await insertGameEvent(client, {
+        gameId: duelRow.game_id,
+        stepNo,
+        kind: "quaffle_duel_result",
+        actorId: winnerId,
+        targetPos: throwTarget,
+        meta: {
+          duelId: duelRow.id,
+          duelKind: kind,
+          winnerId,
+          topTie,
+          tiedTopIds: bestIds,
+          tiePolicy,
+          scores,
+          throwContinued: false,
+          finalHolderId: winnerId || expectedHolderId || null,
+          finalPos: null,
+          outcome: winnerId && winnerId !== expectedHolderId ? "stolen_before_throw" : "holder_kept_control"
+        }
+      });
     }
   } else if (kind === "steal") {
     const expectedHolderId = duelRow.defender_id || null;
-    const upd = await client.query(
-      `
-        UPDATE games
-        SET quaffle_holder_id = $2,
-            quaffle_pos = NULL,
-            quaffle_lock_holder_id = $2,
-            quaffle_lock_step_no = $3,
-            quaffle_steal_cooldown_step_no = $3
-        WHERE id = $1 AND ($4::text IS NULL OR quaffle_holder_id = $4)
-      `,
-      [duelRow.game_id, winnerId, stepNo, expectedHolderId]
-    );
-    if ((upd.rowCount || 0) > 0) {
-      if (winnerId && expectedHolderId && winnerId !== expectedHolderId) {
-        await client.query("UPDATE participants SET stat_quaffle_steals = COALESCE(stat_quaffle_steals, 0) + 1 WHERE id = $1 AND game_id = $2", [
-          winnerId,
-          duelRow.game_id
-        ]);
+    if (winnerId) {
+      const upd = await client.query(
+        `
+          UPDATE games
+          SET quaffle_holder_id = $2,
+              quaffle_pos = NULL,
+              quaffle_lock_holder_id = $2,
+              quaffle_lock_step_no = $3,
+              quaffle_steal_cooldown_step_no = $3
+          WHERE id = $1 AND ($4::text IS NULL OR quaffle_holder_id = $4)
+        `,
+        [duelRow.game_id, winnerId, stepNo, expectedHolderId]
+      );
+      if ((upd.rowCount || 0) > 0) {
+        if (winnerId && expectedHolderId && winnerId !== expectedHolderId) {
+          await client.query("UPDATE participants SET stat_quaffle_steals = COALESCE(stat_quaffle_steals, 0) + 1 WHERE id = $1 AND game_id = $2", [
+            winnerId,
+            duelRow.game_id
+          ]);
+        }
       }
     }
+    await insertGameEvent(client, {
+      gameId: duelRow.game_id,
+      stepNo,
+      kind: "quaffle_duel_result",
+      actorId: winnerId,
+      meta: {
+        duelId: duelRow.id,
+        duelKind: kind,
+        winnerId,
+        topTie,
+        tiedTopIds: bestIds,
+        tiePolicy,
+        scores,
+        finalHolderId: winnerId || expectedHolderId || null,
+        finalPos: null,
+        outcome: winnerId && winnerId !== expectedHolderId ? "stolen" : "holder_kept_control"
+      }
+    });
   }
 
   await client.query(
@@ -586,5 +733,6 @@ module.exports = {
   expireOldDuels,
   insertDuelWithParticipants,
   resolveDuelIfReady,
+  pickDuelWinner,
   setMaybeAdvanceStep
 };
