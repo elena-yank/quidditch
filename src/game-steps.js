@@ -452,6 +452,7 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       lockStepNo
     });
     if (stealCandidates.length === 0) return false;
+    await client.query("ROLLBACK TO SAVEPOINT step_apply");
     const duelId = nanoidId();
     const insCount = await insertDuelWithParticipants(client, {
       duelId,
