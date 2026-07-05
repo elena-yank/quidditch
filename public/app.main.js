@@ -645,7 +645,13 @@ async function voiceSetMicMuted(nextMuted) {
   const next = Boolean(nextMuted);
   state.voice.micMuted = next;
   if (next) voiceStopLocalStream();
-  else await voiceEnsureLocalStream();
+  else {
+    await voiceEnsureLocalStream();
+    // If peers were closed due to disconnection, recreate them
+    if (state.voice.peers.size === 0 && state.gameState) {
+      await syncVoiceFromGameState(state.gameState);
+    }
+  }
   for (const peer of state.voice.peers.values()) {
     try {
       await peer._voiceApplyLocal?.();
