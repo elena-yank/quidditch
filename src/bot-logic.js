@@ -632,65 +632,67 @@ async function runBotsInGameClient(client, gameId) {
   if (Boolean(game.finished)) return { changed: false };
 
   const activeDuelRes = await client.query(
-    "SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, attacker_score, defender_score, resolved_at, winner_id FROM duels WHERE game_id = $1 AND resolved_at IS NULL ORDER BY started_at DESC LIMIT 1 FOR UPDATE",
+    "SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, attacker_score, defender_score, resolved_at, winner_id FROM duels WHERE game_id = $1 AND resolved_at IS NULL ORDER BY started_at DESC FOR UPDATE",
     [gameId]
   );
-  const duel = activeDuelRes.rows[0] || null;
-  if (duel) {
-    const participantIds = uniqueTextArray(duel.participant_ids || [duel.attacker_id, duel.defender_id]);
-    if (participantIds.length >= 2) {
-      await client.query(
-        `
-          INSERT INTO duel_scores (duel_id, participant_id, score)
-          SELECT $1, x, NULL
-          FROM unnest($2::text[]) x
-          ON CONFLICT DO NOTHING
-        `,
+  const duels = activeDuelRes.rows;
+  if (duels.length > 0) {
+    let changed = false;
+    for (const duel of duels) {
+      const participantIds = uniqueTextArray(duel.participant_ids || [duel.attacker_id, duel.defender_id]);
+      if (participantIds.length >= 2) {
+        await client.query(
+          `
+            INSERT INTO duel_scores (duel_id, participant_id, score)
+            SELECT $1, x, NULL
+            FROM unnest($2::text[]) x
+            ON CONFLICT DO NOTHING
+          `,
+          [duel.id, participantIds]
+        );
+      }
+
+      const pRes = await client.query(
+        "SELECT id, is_bot, bot_difficulty FROM participants WHERE game_id = $1 AND id = ANY($2::text[]) FOR UPDATE",
+        [gameId, participantIds]
+      );
+      const byId = new Map(pRes.rows.map((r) => [r.id, r]));
+      const scoresRes = await client.query(
+        "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[]) FOR UPDATE",
         [duel.id, participantIds]
       );
-    }
+      const scoreById = new Map(scoresRes.rows.map((r) => [r.participant_id, r.score]));
 
-    const pRes = await client.query(
-      "SELECT id, is_bot, bot_difficulty FROM participants WHERE game_id = $1 AND id = ANY($2::text[]) FOR UPDATE",
-      [gameId, participantIds]
-    );
-    const byId = new Map(pRes.rows.map((r) => [r.id, r]));
-    const scoresRes = await client.query(
-      "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[]) FOR UPDATE",
-      [duel.id, participantIds]
-    );
-    const scoreById = new Map(scoresRes.rows.map((r) => [r.participant_id, r.score]));
-
-    let changed = false;
-    for (const pid of participantIds) {
-      const p = byId.get(pid) || null;
-      if (!p?.is_bot) continue;
-      if (scoreById.get(pid) != null) continue;
-      await client.query("UPDATE duel_scores SET score = $3 WHERE duel_id = $1 AND participant_id = $2 AND score IS NULL", [
+      for (const pid of participantIds) {
+        const p = byId.get(pid) || null;
+        if (!p?.is_bot) continue;
+        if (scoreById.get(pid) != null) continue;
+        await client.query("UPDATE duel_scores SET score = $3 WHERE duel_id = $1 AND participant_id = $2 AND score IS NULL", [
+          duel.id,
+          pid,
+          botScoreForDuel(p.bot_difficulty)
+        ]);
+        changed = true;
+      }
+      const scoresRes2 = await client.query(
+        "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[])",
+        [duel.id, participantIds]
+      );
+      const scoreById2 = new Map(scoresRes2.rows.map((r) => [r.participant_id, r.score]));
+      await client.query("UPDATE duels SET attacker_score = $2, defender_score = $3 WHERE id = $1", [
         duel.id,
-        pid,
-        botScoreForDuel(p.bot_difficulty)
+        scoreById2.get(duel.attacker_id) ?? null,
+        scoreById2.get(duel.defender_id) ?? null
       ]);
-      changed = true;
-    }
-    const scoresRes2 = await client.query(
-      "SELECT participant_id, score FROM duel_scores WHERE duel_id = $1 AND participant_id = ANY($2::text[])",
-      [duel.id, participantIds]
-    );
-    const scoreById2 = new Map(scoresRes2.rows.map((r) => [r.participant_id, r.score]));
-    await client.query("UPDATE duels SET attacker_score = $2, defender_score = $3 WHERE id = $1", [
-      duel.id,
-      scoreById2.get(duel.attacker_id) ?? null,
-      scoreById2.get(duel.defender_id) ?? null
-    ]);
 
-    const duelRes2 = await client.query(
-      "SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id FROM duels WHERE id = $1 FOR UPDATE",
-      [duel.id]
-    );
-    const duel2 = duelRes2.rows[0] || null;
-    const resolved = await resolveDuelIfReady(client, duel2);
-    if (resolved.resolved) changed = true;
+      const duelRes2 = await client.query(
+        "SELECT id, game_id, attacker_id, defender_id, participant_ids, kind, target_pos, created_step_no, started_at, attacker_score, defender_score, resolved_at, winner_id FROM duels WHERE id = $1 FOR UPDATE",
+        [duel.id]
+      );
+      const duel2 = duelRes2.rows[0] || null;
+      const resolved = await resolveDuelIfReady(client, duel2);
+      if (resolved.resolved) changed = true;
+    }
     return { changed };
   }
 
@@ -730,6 +732,20 @@ async function runBotsInGameClient(client, gameId) {
       posById.set(p.id, pos);
       occupied.add(pos);
     }
+  }
+
+  // Добавляем позиции мячей в occupied, чтобы боты не планировали ход на клетку с мячом
+  if (!game.quaffle_holder_id) {
+    const qPos = normalizeCoord(game.quaffle_pos);
+    if (qPos) occupied.add(qPos);
+  }
+  const b1 = normalizeCoord(game.bludger1_pos);
+  const b2 = normalizeCoord(game.bludger2_pos);
+  if (b1) occupied.add(b1);
+  if (b2) occupied.add(b2);
+  if (!game.snitch_caught_by_id) {
+    const sPos = normalizeCoord(game.snitch_pos);
+    if (sPos) occupied.add(sPos);
   }
 
   let changed = false;

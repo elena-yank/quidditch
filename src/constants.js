@@ -91,7 +91,7 @@ const BOT_DIFFICULTY_BY_LEVEL = new Map(BOT_DIFFICULTIES.map((d) => [d.level, d]
 
 const PLANNED_TURNS = true;
 const TURN_TIMEOUT_MS = 15000;
-const ENFORCE_QUAFFLE_STEAL_LOCKS = false;
+const ENFORCE_QUAFFLE_STEAL_LOCKS = true;
 
 const SNITCH_SPAWNS = ["A1", "G1", "A7", "G7", "A13", "G13"];
 const SNITCH_SPAWNS_SET = new Set(SNITCH_SPAWNS);

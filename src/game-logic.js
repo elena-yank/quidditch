@@ -287,12 +287,19 @@ function moveBludgers({ bludger1Pos, bludger2Pos, forbidden, locked }) {
   const forbiddenCoord = normalizeCoord(forbidden);
   const forbiddenSet = new Set();
   if (forbiddenCoord) forbiddenSet.add(forbiddenCoord);
+  // Бладжеры не могут встать на клетку друг друга
+  forbiddenSet.add(b2From);
+  // Бладжер не может вернуться на предыдущую занятую собой клетку
+  forbiddenSet.add(b1From);
 
   const lockedSet = locked instanceof Set ? locked : new Set();
   const b1To = lockedSet.has(1) ? b1From : (moveBludgerOnce(b1From, forbiddenSet) || b1From);
 
   const forbiddenSetB2 = new Set(forbiddenSet);
+  forbiddenSetB2.delete(b2From);
   forbiddenSetB2.add(b1To);
+  // Бладжер не может вернуться на предыдущую занятую собой клетку
+  forbiddenSetB2.add(b2From);
   let b2To = lockedSet.has(2) ? b2From : (moveBludgerOnce(b2From, forbiddenSetB2) || b2From);
   if (b2To === b1To) b2To = b2From;
   return { bludger1Pos: b1To, bludger2Pos: b2To };

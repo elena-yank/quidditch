@@ -1361,7 +1361,7 @@ async function bootstrap() {
       await refreshRoomOnce();
     });
 
-    els.duelBar.addEventListener("click", async () => {
+    els.duelBar.addEventListener("mousedown", async () => {
       const myId = state.session?.participantId;
       if (!myId) return;
       if (!state.duelUi || state.duelUi.phase !== "active") return;
@@ -1370,14 +1370,9 @@ async function bootstrap() {
 
       state.duelUi.submitted = true;
       stopDuelAnimation();
-      let score = Math.max(0, Math.min(100, Number(state.duelUi.currentPercent || 0)));
-      const startedAtMs = Number(state.duelUi.startedAtMs);
-      const periodMs = Number(state.duelUi.periodMs);
-      if (Number.isFinite(startedAtMs) && Number.isFinite(periodMs) && periodMs > 0) {
-        const t = Math.max(0, Date.now() - startedAtMs);
-        const fill = triangleFill01(t, periodMs);
-        if (Number.isFinite(fill)) score = Math.max(0, Math.min(100, Math.round(fill * 100)));
-      }
+      // Берём процент, который игрок видел в момент нажатия, а не пересчитываем из Date.now().
+      // Это исключает рассинхронизацию между визуалом и отправленным значением.
+      const score = Math.max(0, Math.min(100, Math.round(Number(state.duelUi.currentPercent || 0))));
       els.duelHint.textContent = `Твой результат: ${score}%. Ждём соперника…`;
 
       const res = await api.submitSteal(myId, { duelId, score });

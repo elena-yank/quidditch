@@ -169,7 +169,10 @@ function addActionRoutes(router) {
       const pRes = await client.query(
         `
           SELECT p.id, p.game_id, p.team, p.role, p.pos, p.is_observer,
-                 g.step_no, g.step_started_at, g.team_a, g.team_b, g.started, g.finished, g.paused
+                 g.step_no, g.step_started_at, g.team_a, g.team_b, g.started, g.finished, g.paused,
+                 g.quaffle_pos, g.quaffle_holder_id,
+                 g.bludger1_pos, g.bludger2_pos,
+                 g.snitch_pos
           FROM participants p
           JOIN games g ON g.id = p.game_id
           WHERE p.id = $1
@@ -264,6 +267,23 @@ function addActionRoutes(router) {
         }
       }
 
+      // Проверка, что клетка не занята мячами (квоффл, бладжеры, снитч)
+      const ballPositions = [];
+      if (!p.quaffle_holder_id) {
+        const qPos = normalizeCoord(p.quaffle_pos);
+        if (qPos) ballPositions.push(qPos);
+      }
+      const b1 = normalizeCoord(p.bludger1_pos);
+      const b2 = normalizeCoord(p.bludger2_pos);
+      if (b1) ballPositions.push(b1);
+      if (b2) ballPositions.push(b2);
+      const snitchPos = normalizeCoord(p.snitch_pos);
+      if (snitchPos) ballPositions.push(snitchPos);
+      if (ballPositions.includes(to)) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ error: "cell_occupied_by_ball" });
+      }
+
       await client.query(
         "UPDATE turn_states SET planned_to = $3, updated_at = NOW() WHERE game_id = $1 AND participant_id = $2",
         [p.game_id, p.id, to]
@@ -295,7 +315,8 @@ function addActionRoutes(router) {
                  g.step_no, g.step_started_at, g.team_a, g.team_b, g.started, g.finished, g.paused,
                  g.quaffle_pos, g.quaffle_holder_id,
                  g.quaffle_lock_holder_id, g.quaffle_lock_step_no, g.quaffle_steal_cooldown_step_no,
-                 g.bludger1_pos, g.bludger2_pos
+                 g.bludger1_pos, g.bludger2_pos,
+                 g.snitch_pos
           FROM participants p
           JOIN games g ON g.id = p.game_id
           WHERE p.id = $1
@@ -365,6 +386,25 @@ function addActionRoutes(router) {
       if (to && !canPlannedMove({ participant: p, from, to, game: gameForSpawn })) {
         await client.query("ROLLBACK");
         return res.status(400).json({ error: "illegal_move" });
+      }
+
+      // Проверка, что клетка не занята мячами (квоффл, бладжеры, снитч)
+      if (to) {
+        const ballPositions = [];
+        if (!p.quaffle_holder_id) {
+          const qPos = normalizeCoord(p.quaffle_pos);
+          if (qPos) ballPositions.push(qPos);
+        }
+        const b1 = normalizeCoord(p.bludger1_pos);
+        const b2 = normalizeCoord(p.bludger2_pos);
+        if (b1) ballPositions.push(b1);
+        if (b2) ballPositions.push(b2);
+        const snitchPos = normalizeCoord(p.snitch_pos);
+        if (snitchPos) ballPositions.push(snitchPos);
+        if (ballPositions.includes(to)) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({ error: "cell_occupied_by_ball" });
+        }
       }
 
       const fromAfter = to || from;
@@ -1184,8 +1224,9 @@ function addActionRoutes(router) {
         participantIds,
         scores: participantIds.map((pid) => ({ participantId: pid, score: scoreById.get(pid) ?? null }))
       });
-    } catch {
+    } catch (e) {
       await client.query("ROLLBACK");
+      console.error("[quaffle/steal/submit] failed", { participantId: id, duelId, error: e, stack: e?.stack });
       res.status(500).json({ error: "db_error" });
     } finally {
       client.release();

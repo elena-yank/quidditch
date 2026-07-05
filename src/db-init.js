@@ -254,8 +254,11 @@ async function initDb() {
       )
     `);
     await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS duels_one_active_per_game
-      ON duels (game_id)
+      DROP INDEX IF EXISTS duels_one_active_per_game;
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS duels_one_active_per_game_per_kind
+      ON duels (game_id, kind)
       WHERE resolved_at IS NULL;
     `);
     await client.query(`DROP INDEX IF EXISTS duels_one_per_game_step`);

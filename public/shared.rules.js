@@ -204,8 +204,31 @@
     return d != null && d <= 1;
   }
 
-  function isStealQuaffleLocked() {
-    // Временное отключение локов на выхват после смены владельца.
+  function isStealQuaffleLocked(args) {
+    const gameState = args && args.gameState;
+    if (!gameState || !gameState.game) return false;
+    const stepNo = gameState.game.stepNo;
+    if (stepNo == null) return false;
+
+    const holderId = args && args.holderId != null
+      ? args.holderId
+      : (gameState && gameState.quaffle ? gameState.quaffle.holderId : null);
+    if (!holderId) return false;
+
+    const lockHolderId = gameState.game.quaffleLockHolderId || null;
+    const lockStepNo = gameState.game.quaffleLockStepNo != null ? Number(gameState.game.quaffleLockStepNo) : null;
+    const stealCooldownStepNo = gameState.game.quaffleStealCooldownStepNo != null ? Number(gameState.game.quaffleStealCooldownStepNo) : null;
+
+    // Проверка кулдауна: нельзя красть в ход получения и следующий ход
+    if (stealCooldownStepNo != null && stepNo >= stealCooldownStepNo && stepNo <= stealCooldownStepNo + 1) {
+      return true;
+    }
+
+    // Проверка лока: нельзя красть у holder'а, который только что получил квоффл
+    if (lockHolderId && lockStepNo != null && holderId === lockHolderId && stepNo >= lockStepNo && stepNo <= lockStepNo + 1) {
+      return true;
+    }
+
     return false;
   }
 

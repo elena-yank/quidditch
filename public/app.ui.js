@@ -537,12 +537,12 @@ function captureGameEvents(prevState, nextState) {
 }
 
 function triangleFill01(tMs, periodMs) {
+  // Пилообразный сигнал: всегда растёт от 0 до 1 (0→100%) за periodMs, затем резкий сброс.
+  // В отличие от треугольного сигнала, игрок видит непрерывный рост к 100% и может
+  // предсказать момент клика, а полоска не ходит вниз.
   if (!Number.isFinite(tMs) || !Number.isFinite(periodMs) || periodMs <= 0) return 0;
-  const x = (tMs % periodMs) / (periodMs / 2);
-  const v = 1 - Math.abs(x - 1);
-  if (v < 0) return 0;
-  if (v > 1) return 1;
-  return v;
+  const x = (tMs % periodMs) / periodMs;
+  return x;
 }
 
 function parseServerTimeMs(value) {
@@ -1190,6 +1190,23 @@ function renderPieces(gameState) {
     if (!coord) continue;
     occupied.add(coord);
     pieces.push({ participant: p, coord });
+  }
+
+  // Добавляем позиции мячей в occupied, чтобы клетки с мячами не подсвечивались как доступные для хода
+  const q = gameState.quaffle || {};
+  if (!q.holderId && q.pos) {
+    const qPos = normalizeCoord(q.pos);
+    if (qPos) occupied.add(qPos);
+  }
+  const bludgers = Array.isArray(gameState.bludgers) ? gameState.bludgers : [];
+  for (const b of bludgers) {
+    const bPos = normalizeCoord(b);
+    if (bPos) occupied.add(bPos);
+  }
+  const snitch = gameState.snitch || {};
+  if (snitch.pos) {
+    const sPos = normalizeCoord(snitch.pos);
+    if (sPos) occupied.add(sPos);
   }
 
   for (const item of pieces) {
