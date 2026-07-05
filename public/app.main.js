@@ -1070,7 +1070,33 @@ async function bootstrap() {
     BOT_DIFFICULTIES.length = 0;
     for (const d of meta.botDifficulties || []) BOT_DIFFICULTIES.push(d);
     if (Array.isArray(meta.voiceIceServers) && meta.voiceIceServers.length > 0) {
-      VOICE_ICE_SERVERS = meta.voiceIceServers;
+      // Merge server-provided ICE servers with defaults instead of replacing.
+      // This ensures STUN servers are always available for P2P fallback,
+      // even when the server only returns TURN relay servers.
+      const merged = [...VOICE_ICE_SERVERS];
+      for (const srv of meta.voiceIceServers) {
+        const hasTurn = Array.isArray(srv?.urls)
+          ? srv.urls.some((u) => /^turns?:/i.test(String(u || "").trim()))
+          : false;
+        if (hasTurn) {
+          // Replace any existing TURN entry with the same username, or append
+          const idx = merged.findIndex(
+            (e) =>
+              Array.isArray(e?.urls) &&
+              e.urls.some((u) => /^turns?:/i.test(String(u || "").trim())) &&
+              String(e.username || "") === String(srv.username || "")
+          );
+          if (idx >= 0) merged[idx] = srv;
+          else merged.push(srv);
+        } else {
+          // STUN-only entry — skip if we already have STUN
+          const hasStun = merged.some((e) =>
+            Array.isArray(e?.urls) ? e.urls.some((u) => /^stun:/i.test(String(u || "").trim())) : false
+          );
+          if (!hasStun) merged.push(srv);
+        }
+      }
+      VOICE_ICE_SERVERS = merged;
     }
     if (!voiceHasRelayServer()) {
       console.warn("[voice] TURN relay is not configured. Audio may fail for users behind NAT.");

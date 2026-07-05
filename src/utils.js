@@ -33,7 +33,9 @@ function parseTurnserverConfFallback() {
     tlsPort: "5349",
     noTls: false,
     username: null,
-    credential: null
+    credential: null,
+    externalIp: null,
+    realm: null
   };
 
   for (const line of raw.split(/\r?\n/)) {
@@ -52,8 +54,12 @@ function parseTurnserverConfFallback() {
     const value = trimmed.slice(eqIndex + 1).trim();
     if (!value) continue;
 
-    if (key === "external-ip" || key === "realm") {
-      if (!config.host) config.host = value;
+    if (key === "external-ip") {
+      config.externalIp = value;
+      continue;
+    }
+    if (key === "realm") {
+      config.realm = value;
       continue;
     }
     if (key === "listening-port") {
@@ -73,15 +79,22 @@ function parseTurnserverConfFallback() {
     }
   }
 
+  // Prefer external-ip (actual IP) over realm (domain name) for TURN host
+  config.host = config.externalIp || config.realm;
+
   if (!config.host || !config.username || !config.credential) return null;
 
-  const urls = [
+  const turnUrls = [
     `turn:${config.host}:${config.port}?transport=udp`,
     `turn:${config.host}:${config.port}?transport=tcp`
   ];
-  if (!config.noTls && config.tlsPort) urls.push(`turns:${config.host}:${config.tlsPort}?transport=tcp`);
+  if (!config.noTls && config.tlsPort) turnUrls.push(`turns:${config.host}:${config.tlsPort}?transport=tcp`);
 
-  return [{ urls, username: config.username, credential: config.credential }];
+  // Always include STUN servers alongside TURN for P2P fallback
+  return [
+    { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+    { urls: turnUrls, username: config.username, credential: config.credential }
+  ];
 }
 
 function parseVoiceIceServersEnv() {
