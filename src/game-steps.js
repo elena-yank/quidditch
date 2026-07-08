@@ -588,6 +588,36 @@ async function processPlayerActions({
         }
       }
 
+      // Бладжеры не могут оказаться на одной клетке:
+      // если конечная позиция совпадает с позицией другого бладжера,
+      // бладжер останавливается в соседней свободной клетке
+      const otherBludgerPos = targetIdx === 1 ? b2Pos : b1Pos;
+      if (endPos === otherBludgerPos) {
+        const otherRC = coordToRC(otherBludgerPos);
+        if (otherRC) {
+          const candidates = [];
+          for (let dr = -1; dr <= 1; dr += 1) {
+            for (let dc = -1; dc <= 1; dc += 1) {
+              if (dr === 0 && dc === 0) continue;
+              const coord = rcToCoord(otherRC.r + dr, otherRC.c + dc);
+              if (!coord) continue;
+              if (occupantAnyByCoord.has(coord)) continue;
+              if (!qHolderId) {
+                const freeQ = normalizeCoord(qPos) || "D7";
+                if (coord === freeQ) continue;
+              }
+              candidates.push(coord);
+            }
+          }
+          if (candidates.length > 0) {
+            // Выбираем клетку, ближайшую к цели удара
+            candidates.sort((a, b) => chebyshevDistance(a, to) - chebyshevDistance(b, to));
+            endPos = candidates[0];
+          }
+          // Если свободных клеток рядом нет — бладжер остаётся на месте
+        }
+      }
+
       if (targetIdx === 1) b1Pos = endPos;
       else b2Pos = endPos;
       bludgersHitThisStep.add(targetIdx);
@@ -930,6 +960,16 @@ async function expireOldTurns(gameId) {
       await ensureTurnState(client, gameId, pid, stepNo);
     }
 
+    // Если есть активные дуэли — не очищаем planned_to, иначе заявки на перемещение пропадут
+    const activeDuelRes = await client.query(
+      "SELECT id FROM duels WHERE game_id = $1 AND kind IN ('steal', 'pickup', 'throw_steal', 'snitch') AND resolved_at IS NULL ORDER BY started_at DESC LIMIT 1",
+      [gameId]
+    );
+    if (activeDuelRes.rows[0]) {
+      await client.query("COMMIT");
+      return { changed: false };
+    }
+
     const upd = await client.query(
       `
         UPDATE turn_states
@@ -988,6 +1028,13 @@ async function forceExpireTurnsIfTimedOutClient(client, gameRow) {
   for (const pid of activeIds) {
     await ensureTurnState(client, gameId, pid, stepNo);
   }
+
+  // Если есть активные дуэли — не очищаем planned_to, иначе заявки на перемещение пропадут
+  const activeDuelRes = await client.query(
+    "SELECT id FROM duels WHERE game_id = $1 AND kind IN ('steal', 'pickup', 'throw_steal', 'snitch') AND resolved_at IS NULL ORDER BY started_at DESC LIMIT 1",
+    [gameId]
+  );
+  if (activeDuelRes.rows[0]) return { expired: false };
 
   await client.query(
     `
@@ -1836,11 +1883,13 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
       `UPDATE games SET quaffle_holder_id = $2, quaffle_pos = $3,
        quaffle_lock_holder_id = $4, quaffle_lock_step_no = $5, quaffle_steal_cooldown_step_no = $6,
        snitch_pos = $7, snitch_revealed = $8, snitch_caught_by_id = $9, snitch_caught_step_no = $10,
-       snitch_reveal_count = $11, snitch_hide_count = $12
+       snitch_reveal_count = $11, snitch_hide_count = $12,
+       score_a = $13, score_b = $14
        WHERE id = $1`,
       [gameId, qHolderId, qPos, lockHolderId, lockStepNo, stealCooldownStepNo,
        nextSnitchPos, nextSnitchRevealed, nextSnitchCaughtByIdResult, nextSnitchCaughtStepNoResult,
-       snitchRevealCount, snitchHideCount]
+       snitchRevealCount, snitchHideCount,
+       scoreA, scoreB]
     );
     return;
   }
