@@ -1807,15 +1807,8 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     else if (snitchCatcherTeam === gameForSpawn.team_b) scoreB += 30;
   }
 
-  // Сохраняем прогресс поимки снитча для ловцов
+  // Обновляем in-memory participants для корректного snapshotState
   if (seekerUpdates && seekerUpdates.length > 0) {
-    for (const upd of seekerUpdates) {
-      await client.query(
-        "UPDATE participants SET snitch_progress = $1 WHERE id = $2 AND game_id = $3",
-        [upd.next, upd.id, gameId]
-      );
-    }
-    // Обновляем in-memory participants для корректного snapshotState
     const updMap = new Map(seekerUpdates.map((u) => [u.id, u.next]));
     for (const p of participants) {
       if (updMap.has(p.id)) {
@@ -1824,17 +1817,13 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     }
   }
 
-  // Если снитч респавнится — сбрасываем прогресс
+  // Если снитч респавнится — сбрасываем прогресс в памяти
   if (snitchCaughtById && !nextSnitchCaughtByIdResult) {
-    await client.query("UPDATE participants SET snitch_progress = 0 WHERE game_id = $1 AND role = 'seeker'", [gameId]);
-  }
-
-  // Если снитч пойман — обновляем статистику
-  if (snitchCaughtNow && snitchCatcherId) {
-    await client.query(
-      "UPDATE participants SET stat_snitch_catches = COALESCE(stat_snitch_catches, 0) + 1 WHERE id = $1 AND game_id = $2",
-      [snitchCatcherId, gameId]
-    );
+    for (const p of participants) {
+      if (p.role === 'seeker') {
+        p.snitch_progress = 0;
+      }
+    }
   }
 
   // Если дуэль снитча — создаём её
@@ -1876,6 +1865,15 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
     }
   }
 
+  // Если снитч пойман — обновляем статистику (ДО early return, т.к. это безопасно:
+  // при повторной обработке шага snitchCaughtNow будет false, т.к. снитч уже пойман)
+  if (snitchCaughtNow && snitchCatcherId) {
+    await client.query(
+      "UPDATE participants SET stat_snitch_catches = COALESCE(stat_snitch_catches, 0) + 1 WHERE id = $1 AND game_id = $2",
+      [snitchCatcherId, gameId]
+    );
+  }
+
   // Если есть дуэли — завершаем post-move, не применяя действия
   // Дуэли будут разрешены позже, когда игроки отправят свои счета
   if (anyDuelCreated) {
@@ -1892,6 +1890,23 @@ async function maybeAdvanceStep(client, gameId, depth = 0) {
        scoreA, scoreB]
     );
     return;
+  }
+
+  // === СОХРАНЯЕМ ПРОГРЕСС СНИТЧА В БД (только после подтверждения, что шаг финализируется) ===
+  // Важно: это должно быть ПОСЛЕ early return, чтобы при повторной обработке шага
+  // (после разрешения дуэлей) прогресс не накапливался дважды за один шаг.
+  if (seekerUpdates && seekerUpdates.length > 0) {
+    for (const upd of seekerUpdates) {
+      await client.query(
+        "UPDATE participants SET snitch_progress = $1 WHERE id = $2 AND game_id = $3",
+        [upd.next, upd.id, gameId]
+      );
+    }
+  }
+
+  // Если снитч респавнится — сбрасываем прогресс в БД
+  if (snitchCaughtById && !nextSnitchCaughtByIdResult) {
+    await client.query("UPDATE participants SET snitch_progress = 0 WHERE game_id = $1 AND role = 'seeker'", [gameId]);
   }
 
   // === AUTO KEEPER PICKUP ===

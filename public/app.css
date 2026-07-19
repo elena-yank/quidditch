@@ -1509,8 +1509,16 @@ body.inRoom .toast {
 
 .barFill {
   height: 100%;
-  width: 0%;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
   background: linear-gradient(90deg, rgba(176, 53, 74, 0.9), rgba(126, 208, 141, 0.9));
+  will-change: transform;
+  transition: transform 80ms linear;
+}
+
+.barFill.no-transition {
+  transition: none !important;
 }
 
 .overlayText {

@@ -105,7 +105,16 @@ function pickSnitchRespawnCoord({ seekerA, seekerB, forbidden }) {
   const a = normalizeCoord(seekerA);
   const b = normalizeCoord(seekerB);
   const candidates = ALL_COORDS.filter((c) => !(forbidden && forbidden.has(c)));
-  if (candidates.length === 0) return randomChoice(SNITCH_SPAWNS) || "A7";
+  if (candidates.length === 0) {
+    // Если все клетки доски заняты — пробуем SNITCH_SPAWNS, исключая занятые
+    const spawnFree = SNITCH_SPAWNS.filter((c) => !(forbidden && forbidden.has(c)));
+    if (spawnFree.length > 0) return randomChoice(spawnFree);
+    // Если и spawn-точки заняты — ищем любую свободную клетку перебором
+    for (const c of ALL_COORDS) {
+      if (!forbidden || !forbidden.has(c)) return c;
+    }
+    return "A7";
+  }
 
   let best = [];
   let bestScore = -Infinity;
@@ -124,7 +133,12 @@ function pickSnitchRespawnCoord({ seekerA, seekerB, forbidden }) {
       best.push(c);
     }
   }
-  return randomChoice(best) || best[0] || randomChoice(SNITCH_SPAWNS) || "A7";
+  const picked = randomChoice(best) || best[0];
+  if (picked) return picked;
+  // Финальный fallback — только свободные spawn-точки
+  const spawnFree = SNITCH_SPAWNS.filter((c) => !(forbidden && forbidden.has(c)));
+  if (spawnFree.length > 0) return randomChoice(spawnFree);
+  return "A7";
 }
 
 function buildGameResults(gameRow, participants) {

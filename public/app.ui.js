@@ -605,6 +605,40 @@ function stopDuelAnimation() {
   const cancel = window.cancelAnimationFrame ? window.cancelAnimationFrame.bind(window) : clearTimeout;
   if (state.duelUi.raf) cancel(state.duelUi.raf);
   state.duelUi.raf = null;
+  const barFill = ensureDuelBarFill();
+  if (barFill) {
+    barFill.classList.remove("no-transition");
+    // Фиксируем позицию на момент остановки через тайминг (без GC и layout)
+    const now = Date.now();
+    let t = now - state.duelUi.startedAtMs;
+    if (t < 0) t = 0;
+    const fill = triangleFill01(t, state.duelUi.periodMs);
+    state.duelUi.currentPercent = Math.round(fill * 100);
+    barFill.style.transform = `scaleX(${fill})`;
+  }
+}
+
+function duelAnimationLoop() {
+  if (!state.duelUi || state.duelUi.phase !== "active") return;
+  const barFill = ensureDuelBarFill();
+  if (!barFill) return;
+  const now = Date.now();
+  let t = now - state.duelUi.startedAtMs;
+  if (t < 0) t = 0;
+  const fill = triangleFill01(t, state.duelUi.periodMs);
+  // При перескоке через период (1→0) сбрасываем без transition,
+  // чтобы не было видимого отката полоски справа налево
+  const prev = state.duelUi._prevFill != null ? state.duelUi._prevFill : 0;
+  if (prev > 0.8 && fill < 0.2) {
+    barFill.classList.add("no-transition");
+    barFill.style.transform = `scaleX(${fill})`;
+    void barFill.offsetHeight;
+    barFill.classList.remove("no-transition");
+  } else {
+    barFill.style.transform = `scaleX(${fill})`;
+  }
+  state.duelUi._prevFill = fill;
+  state.duelUi.raf = requestAnimationFrame(duelAnimationLoop);
 }
 
 function startDuelAnimation() {
@@ -612,22 +646,9 @@ function startDuelAnimation() {
   if (!state.duelUi) return;
   const barFill = ensureDuelBarFill();
   if (!barFill) return;
-  const nextFrame = window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : (cb) => setTimeout(cb, 16);
-  const tick = () => {
-    if (!state.duelUi) return;
-    if (state.duelUi.phase !== "active") return;
-    const now = Date.now();
-    let t = now - state.duelUi.startedAtMs;
-    if (t < 0) {
-      state.duelUi.startedAtMs = now;
-      t = 0;
-    }
-    const fill = triangleFill01(t, state.duelUi.periodMs);
-    state.duelUi.currentPercent = Math.round(fill * 100);
-    barFill.style.width = `${state.duelUi.currentPercent}%`;
-    state.duelUi.raf = nextFrame(tick);
-  };
-  state.duelUi.raf = nextFrame(tick);
+  barFill.classList.remove("no-transition");
+  state.duelUi._prevFill = 0;
+  duelAnimationLoop();
 }
 
 function openDuelOverlay(duel, myId) {
@@ -669,7 +690,14 @@ function openDuelOverlay(duel, myId) {
   }
 
   const barFill = ensureDuelBarFill();
-  if (barFill) barFill.style.width = "0%";
+  if (barFill) {
+    // Сброс без transition — мгновенный сброс, затем rAF плавно поведёт вверх
+    barFill.classList.add("no-transition");
+    barFill.style.transform = "scaleX(0)";
+    // Форсируем reflow, чтобы сброс применился до включения transition
+    void barFill.offsetHeight;
+    barFill.classList.remove("no-transition");
+  }
 
   if (isResolved) {
     stopDuelAnimation();
@@ -688,7 +716,12 @@ function openDuelOverlay(duel, myId) {
       const b = duel.defenderScore ?? 0;
       parts.push(`${attackerName}: ${a}%, ${defenderName}: ${b}%`);
     }
-    if (barFill) barFill.style.width = "0%";
+    if (barFill) {
+      barFill.classList.add("no-transition");
+      barFill.style.transform = "scaleX(0)";
+      void barFill.offsetHeight;
+      barFill.classList.remove("no-transition");
+    }
     els.duelHint.textContent = "";
     els.duelResult.textContent = parts.join(", ");
     state.duelUi.phase = "resolved";
