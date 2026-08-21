@@ -857,9 +857,12 @@ async function ensureBoardPitchLayoutLoaded() {
   }
 }
 
-function renderBoard() {
+function buildBoardOnce() {
   if (!els.pitch) return;
+  // Сетка поля статична — строим её только один раз за сессию.
+  if (state.boardBuilt && els.pitch.childElementCount > 0) return;
   els.pitch.innerHTML = "";
+  state.boardBuilt = false;
 
   const layout = BOARD_PITCH_LAYOUT || buildFallbackPitchLayout();
 
@@ -881,6 +884,7 @@ function renderBoard() {
       els.pitch.appendChild(cell);
     }
   }
+  state.boardBuilt = true;
 }
 
 function clearBoardSelection() {
@@ -995,42 +999,73 @@ function highlightHitTargets(gameState, bludgerCoord) {
   return any;
 }
 
-function renderQuaffle(gameState) {
-  const q = gameState.quaffle || { holderId: null, pos: "D7" };
-  if (!q.holderId) {
-    const coord = normalizeCoord(q.pos) || "D7";
-    const cell = els.board.querySelector(`[data-coord='${coord}']`);
-    if (cell) {
-      const el = document.createElement("div");
-      el.className = "quaffle";
-      cell.appendChild(el);
+// Реконсиляция одиночного элемента (квоффл/снитч): переиспользует DOM-узел,
+// перемещая его в нужную клетку, вместо пересоздания.
+function reconcileSingleItem(existing, cls, coord) {
+  if (!coord) {
+    if (existing) {
+      existing.remove();
+      return null;
     }
+    return null;
   }
-}
-
-function renderBludgers(gameState) {
-  const arr = Array.isArray(gameState.bludgers) ? gameState.bludgers : [];
-  for (const pos of arr) {
-    const coord = normalizeCoord(pos);
-    if (!coord) continue;
-    const cell = els.board.querySelector(`[data-coord='${coord}']`);
-    if (!cell) continue;
-    const el = document.createElement("div");
-    el.className = "bludger";
-    cell.appendChild(el);
-  }
-}
-
-function renderSnitch(gameState) {
-  const coord = normalizeCoord(gameState?.snitch?.pos) || null;
-  const caughtById = gameState?.snitch?.caughtById || null;
-  if (caughtById) return;
-  if (!coord) return;
   const cell = els.board.querySelector(`[data-coord='${coord}']`);
-  if (!cell) return;
+  if (!cell) {
+    if (existing) existing.remove();
+    return null;
+  }
+  if (existing) {
+    if (existing.parentElement !== cell) cell.appendChild(existing);
+    return existing;
+  }
   const el = document.createElement("div");
-  el.className = "snitch";
+  el.className = cls;
   cell.appendChild(el);
+  return el;
+}
+
+// Реконсиляция списка однотипных элементов (бладжеры).
+function reconcileListItem(existing, cls, coord) {
+  const cell = els.board.querySelector(`[data-coord='${coord}']`);
+  if (!cell) {
+    if (existing) existing.remove();
+    return null;
+  }
+  if (existing) {
+    if (existing.parentElement !== cell) cell.appendChild(existing);
+    return existing;
+  }
+  const el = document.createElement("div");
+  el.className = cls;
+  cell.appendChild(el);
+  return el;
+}
+
+function reconcileItemEls(gameState) {
+  if (!state.itemEls) state.itemEls = { quaffle: null, bludgers: [], snitch: null };
+
+  // Квоффл рисуем только когда у него нет держателя (иначе бейдж на фишке).
+  const q = gameState.quaffle || { holderId: null, pos: "D7" };
+  const qCoord = !q.holderId ? (normalizeCoord(q.pos) || "D7") : null;
+  state.itemEls.quaffle = reconcileSingleItem(state.itemEls.quaffle, "quaffle", qCoord);
+
+  // Бладжеры.
+  const bludgers = Array.isArray(gameState.bludgers) ? gameState.bludgers : [];
+  const bludgerCoords = bludgers.map((b) => normalizeCoord(b)).filter(Boolean);
+  const nextBludgers = [];
+  for (let i = 0; i < bludgerCoords.length; i += 1) {
+    nextBludgers.push(reconcileListItem(state.itemEls.bludgers[i] || null, "bludger", bludgerCoords[i]));
+  }
+  // Удаляем лишние бладжеры, если их стало меньше.
+  for (let i = bludgerCoords.length; i < (state.itemEls.bludgers || []).length; i += 1) {
+    const el = state.itemEls.bludgers[i];
+    if (el) el.remove();
+  }
+  state.itemEls.bludgers = nextBludgers;
+
+  // Снитч — рисуем только если он видим и не пойман.
+  const snitchCoord = !gameState?.snitch?.caughtById ? (normalizeCoord(gameState?.snitch?.pos) || null) : null;
+  state.itemEls.snitch = reconcileSingleItem(state.itemEls.snitch, "snitch", snitchCoord);
 }
 
 function updateQuaffleUi(gameState) {
@@ -1204,6 +1239,64 @@ function updateQuaffleUi(gameState) {
   }
 }
 
+// Инкрементальная отрисовка фишек: переиспользует DOM-узлы, перенося их между
+// клетками, вместо пересоздания. Удаляет фишки, которых больше нет в state.
+function reconcilePieces(gameState, pieces, { myId, quaffleHolderId, isPaused }) {
+  if (!state.pieceEls) state.pieceEls = new Map();
+  const registry = state.pieceEls;
+  const teamA = gameState.game.teamA;
+  const seen = new Set();
+
+  for (const item of pieces) {
+    const p = item.participant;
+    const pid = p.id;
+    seen.add(pid);
+
+    let el = registry.get(pid);
+    if (!el) {
+      el = document.createElement("div");
+      el.classList.add("piece");
+      registry.set(pid, el);
+    }
+
+    const cell = els.board.querySelector(`[data-coord='${item.coord}']`);
+    if (!cell) continue;
+
+    // Переносим фишку в нужную клетку (appendChild ставит её наверх, как в исходном коде).
+    cell.appendChild(el);
+
+    const isA = p.team === teamA;
+    const isMe = myId && p.id === myId;
+    const controllable = isMe && isMovableRole(p.role) && !isPaused;
+
+    el.className = `piece ${isA ? "teamA" : "teamB"}${controllable ? " controllable" : ""}${isMe ? " me" : ""}${Boolean(p.stunned) ? " stunned" : ""}`;
+    el.dataset.participantId = p.id;
+    el.dataset.coord = item.coord;
+    el.dataset.role = p.role || "";
+    el.textContent = isKeeperRole(p.role) ? "В" : isBeaterRole(p.role) ? "З" : isSeekerRole(p.role) ? "Л" : (p.role === "chaser2" ? "О2" : "О1");
+    if (controllable) el.title = "Нажми на подсвеченную клетку, чтобы сделать ход.";
+    else el.title = "";
+
+    const hasBadge = Boolean(quaffleHolderId && quaffleHolderId === p.id);
+    const badge = el.querySelector(".quaffleBadge");
+    if (hasBadge && !badge) {
+      const b = document.createElement("div");
+      b.className = "quaffleBadge";
+      el.appendChild(b);
+    } else if (!hasBadge && badge) {
+      badge.remove();
+    }
+  }
+
+  // Удаляем фишки, которых больше нет в текущем state.
+  for (const [pid, el] of registry) {
+    if (!seen.has(pid)) {
+      el.remove();
+      registry.delete(pid);
+    }
+  }
+}
+
 function renderPieces(gameState) {
   const isPaused = Boolean(gameState.game?.paused);
   for (const cell of els.board.querySelectorAll(".cell.blocked")) cell.classList.remove("blocked");
@@ -1242,29 +1335,7 @@ function renderPieces(gameState) {
     if (sPos) occupied.add(sPos);
   }
 
-  for (const item of pieces) {
-    const cell = els.board.querySelector(`[data-coord='${item.coord}']`);
-    if (!cell) continue;
-
-    const p = item.participant;
-    const piece = document.createElement("div");
-    const isA = p.team === gameState.game.teamA;
-    const isMe = state.session?.participantId && p.id === state.session.participantId;
-    const controllable = isMe && isMovableRole(p.role) && !isPaused;
-
-    piece.className = `piece ${isA ? "teamA" : "teamB"}${controllable ? " controllable" : ""}${isMe ? " me" : ""}${Boolean(p.stunned) ? " stunned" : ""}`;
-    piece.dataset.participantId = p.id;
-    piece.dataset.coord = item.coord;
-    piece.dataset.role = p.role || "";
-    piece.textContent = isKeeperRole(p.role) ? "В" : isBeaterRole(p.role) ? "З" : isSeekerRole(p.role) ? "Л" : (p.role === "chaser2" ? "О2" : "О1");
-    if (controllable) piece.title = "Нажми на подсвеченную клетку, чтобы сделать ход.";
-    if (quaffleHolderId && quaffleHolderId === p.id) {
-      const badge = document.createElement("div");
-      badge.className = "quaffleBadge";
-      piece.appendChild(badge);
-    }
-    cell.appendChild(piece);
-  }
+  reconcilePieces(gameState, pieces, { myId, quaffleHolderId, isPaused });
 
   clearBoardSelection();
   const me = myId ? gameState.participants.find((p) => p.id === myId) : null;
@@ -2553,11 +2624,9 @@ function renderRoom(gameState) {
   renderRolePicker(gameState, me);
   if (els.participantsOverlay && !els.participantsOverlay.classList.contains("hidden")) renderParticipants(gameState);
   if (els.observersOverlay && !els.observersOverlay.classList.contains("hidden")) renderObservers(gameState);
-  renderBoard();
+  buildBoardOnce();
   syncSidePanelHeight();
-  renderQuaffle(gameState);
-  renderBludgers(gameState);
-  renderSnitch(gameState);
+  reconcileItemEls(gameState);
   renderPieces(gameState);
   updateQuaffleUi(gameState);
   updateStartLockUi(gameState, me);

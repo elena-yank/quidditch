@@ -48,6 +48,9 @@ const state = {
   lastStunnedStepNo: null,
   lastMoveTap: null,
   draft: { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null },
+  boardBuilt: false,
+  pieceEls: new Map(),
+  itemEls: { quaffle: null, bludgers: [], snitch: null },
   voice: {
     micMuted: true,
     speakerMuted: false,

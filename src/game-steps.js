@@ -1230,6 +1230,7 @@ function resolvePendingGoal(pendingGoalResolution, qHolderId, qPos, occupantKeep
     stealCooldownStepNo: null,
     scored: true,
     scoreDelta,
+    scoringTeam,
     actorId: pendingGoalResolution.actorId,
     keeperId: pendingGoalResolution.keeperId,
     targetPos

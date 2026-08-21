@@ -1,0 +1,18 @@
+time="2026-08-21T21:08:43+03:00" level=warning msg="The \"POSTGRES_DB\" variable is not set. Defaulting to a blank string."
+time="2026-08-21T21:08:43+03:00" level=warning msg="The \"POSTGRES_USER\" variable is not set. Defaulting to a blank string."
+time="2026-08-21T21:08:43+03:00" level=warning msg="The \"POSTGRES_PASSWORD\" variable is not set. Defaulting to a blank string."
+time="2026-08-21T21:08:43+03:00" level=warning msg="The \"POSTGRES_USER\" variable is not set. Defaulting to a blank string."
+time="2026-08-21T21:08:43+03:00" level=warning msg="The \"POSTGRES_DB\" variable is not set. Defaulting to a blank string."
+DATABASE_URL=postgres://postgres:353d8446982e46c5b164e7a65fb75d53@db:5432/kwidditch
+[eval]:1
+const {pool}=require('./src/db'); pool.query('SELECT 1').then(r=, r.rows[0]); process.exit(0)}).catch(e=, e.message); process.exit(1)})
+                                                                ^
+Expression expected
+
+SyntaxError: Unexpected token ','
+    at makeContextifyScript (node:internal/vm:194:14)
+    at compileScript (node:internal/process/execution:388:10)
+    at evalTypeScript (node:internal/process/execution:260:22)
+    at node:internal/main/eval_string:71:3
+
+Node.js v24.19.0

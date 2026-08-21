@@ -818,8 +818,34 @@ function resetRoomScopedState() {
   if (els.chatHint) els.chatHint.textContent = "";
   if (els.chatLog) els.chatLog.innerHTML = "";
   state.draft = { to: null, movePickedAt: null, actionType: null, actionPickedAt: null, actionTo: null, actionBludger: null };
+
+  // Сбрасываем инкрементальный рендер поля: удаляем фишки/мячи из DOM и
+  // сбрасываем флаг сетки, чтобы при входе в комнату всё перестроилось заново.
+  resetBoardLayers();
+
   renderEventLog();
   voiceStopAll();
+}
+
+function resetBoardLayers() {
+  const registry = state.pieceEls;
+  if (registry && registry instanceof Map) {
+    for (const el of registry.values()) {
+      try { el.remove(); } catch {}
+    }
+    registry.clear();
+  }
+  const itemEls = state.itemEls;
+  if (itemEls) {
+    if (itemEls.quaffle) { try { itemEls.quaffle.remove(); } catch {} itemEls.quaffle = null; }
+    if (Array.isArray(itemEls.bludgers)) {
+      for (const el of itemEls.bludgers) { if (el) { try { el.remove(); } catch {} } }
+      itemEls.bludgers = [];
+    }
+    if (itemEls.snitch) { try { itemEls.snitch.remove(); } catch {} itemEls.snitch = null; }
+  }
+  if (els.pitch) els.pitch.innerHTML = "";
+  state.boardBuilt = false;
 }
 
 async function goRoom(code) {
